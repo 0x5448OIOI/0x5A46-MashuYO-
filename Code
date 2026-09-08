@@ -3251,7 +3251,7 @@ local J = {
     spin       = false,
     spinVel    = 8,
     fly        = false,
-    flyVel     = 60,
+    flyVel     = 1,
     clickTP    = false,
 }
 
@@ -3305,45 +3305,53 @@ do
     end)
 
     ---------------------------------------------------------- fly
-    -- Refeito no estilo do Infinite Yield (o fly classico do Rocky2u).
-    -- O que faz ele parecer "molhado" e nao seco:
-    --   1) a velocidade NAO e ligado/desligado, ela sobe numa rampa
-    --      (speed += 0.5 + speed/maxspeed) e desce sozinha quando voce
-    --      solta a tecla, entao tem arranque e tem deriva;
-    --   2) um BodyGyro segura o corpo virado pra camera e INCLINA ele
-    --      pra frente proporcional a velocidade — e essa inclinacao que
-    --      da a sensacao de estar voando de verdade;
-    --   3) quando voce solta tudo, ele continua na ultima direcao ate a
-    --      velocidade zerar, em vez de parar no ar de uma vez.
-    -- Aqui eu PRECISO de BodyGyro/BodyVelocity de verdade (e a fisica
-    -- deles que suaviza). Como o Anti force apaga esse tipo de coisa, eu
-    -- batizo as minhas de "0x5A46_" e o Anti force pula esse prefixo.
+    -- Isto aqui e o sFLY do Infinite Yield, portado. Fui ler a fonte que
+    -- voce mandou e descobri que eu tinha errado o diagnostico: o IY
+    -- NAO tem rampa de aceleracao nem inclinacao. Ele faz:
+    --   SPEED = 50 quando alguma tecla esta segurada, 0 quando nao.
+    --   BV.Velocity = ((cam.LookVector * (F+B))
+    --                  + ((cam.CFrame * CFrame.new(L+R, (F+B+Q+E)*0.2, 0).p)
+    --                     - cam.CFrame.p)) * SPEED
+    --   BG.CFrame = cam.CFrame        -- reto, sem CFrame.Angles
+    -- O jeitao bom vem de tres coisas que eu tinha errado:
+    --   1) o deslocamento lateral sai de um CFrame RELATIVO a camera, e
+    --      nao de RightVector puro — por isso ele acompanha a inclinacao
+    --      da camera em vez de deslizar reto;
+    --   2) aquele (F+B+Q+E)*0.2 no Y: andar pra frente ja levanta um
+    --      pouco conforme o angulo da camera. E o "peso" do voo;
+    --   3) sobe/desce e Q e E, com o dobro da forca (*2).
+    -- O que eu mantive meu: os nomes "0x5A46_" nas instancias (senao o
+    -- Anti force desta aba apaga o proprio voo) e o bind no X.
+    -- Detalhe do IY: a velocidade dele e MULTIPLICADOR. iyflyspeed = 1
+    -- vira 50 studs/s. Por isso o slider agora vai de 1 a 20, nao em
+    -- studs. No IY o multiplicador so entrava quando voce apertava a
+    -- tecla; eu aplico no loop, entao mexer no slider vale na hora.
     local bg, bv
-    local ctrl  = { f = 0, b = 0, l = 0, r = 0, u = 0, d = 0 }
-    local ultimo = { f = 0, b = 0, l = 0, r = 0, u = 0, d = 0 }
-    local speed = 0
+    local CONTROL  = { F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0 }
+    local lCONTROL = { F = 0, B = 0, L = 0, R = 0, Q = 0, E = 0 }
+    local SPEED = 0
 
     local function limparVoo()
         if bg then bg:Destroy() bg = nil end
         if bv then bv:Destroy() bv = nil end
-        speed = 0
-        for k in pairs(ctrl) do ctrl[k] = 0 ultimo[k] = 0 end
+        SPEED = 0
+        for k in pairs(CONTROL) do CONTROL[k] = 0 lCONTROL[k] = 0 end
     end
     local function montarVoo()
-        local r = hrp()
-        if not r then return false end
+        local T = hrp()
+        if not T then return false end
         limparVoo()
         bg = Instance.new("BodyGyro")
         bg.Name = "0x5A46_flyGyro"
         bg.P = 9e4
         bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
-        bg.CFrame = r.CFrame
-        bg.Parent = r
+        bg.CFrame = T.CFrame
+        bg.Parent = T
         bv = Instance.new("BodyVelocity")
         bv.Name = "0x5A46_flyVel"
-        bv.Velocity = Vector3.new(0, 0.1, 0)
+        bv.Velocity = Vector3.new(0, 0, 0)
         bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-        bv.Parent = r
+        bv.Parent = T
         return true
     end
 
@@ -3360,57 +3368,71 @@ do
                 if h then h.PlatformStand = J.ragdoll end
             end
         end })
-    sec:Slider({ Name = "Fly speed", Min = 20, Max = 300, Default = 50,
-        Callback = function(v) J.flyVel = v end })
+    sec:Slider({ Name = "Fly speed", Min = 1, Max = 20, Default = 1,
+        Decimals = 1, Callback = function(v) J.flyVel = v end })
+    sec:Label("W A S D  ·  Q E")
 
+    -- os nomes seguem o IY: a tecla E enche CONTROL.Q e a tecla Q enche
+    -- CONTROL.E. Parece trocado, mas e assim na fonte e a conta usa desse
+    -- jeito, entao deixei igual pra nao inventar bug.
     local MAPA = {
-        [Enum.KeyCode.W] = { "f",  1 }, [Enum.KeyCode.S] = { "b", -1 },
-        [Enum.KeyCode.A] = { "l", -1 }, [Enum.KeyCode.D] = { "r",  1 },
-        [Enum.KeyCode.Space] = { "u", 1 }, [Enum.KeyCode.LeftShift] = { "d", -1 },
+        [Enum.KeyCode.W] = { "F",  1 },
+        [Enum.KeyCode.S] = { "B", -1 },
+        [Enum.KeyCode.A] = { "L", -1 },
+        [Enum.KeyCode.D] = { "R",  1 },
+        [Enum.KeyCode.E] = { "Q",  2 },
+        [Enum.KeyCode.Q] = { "E", -2 },
     }
     UIS.InputBegan:Connect(function(i, digitando)
         if digitando or not J.fly then return end
         local m = MAPA[i.KeyCode]
-        if m then ctrl[m[1]] = m[2] end
+        if m then CONTROL[m[1]] = m[2] end
     end)
     UIS.InputEnded:Connect(function(i)
         local m = MAPA[i.KeyCode]
-        if m then ctrl[m[1]] = 0 end
+        if m then CONTROL[m[1]] = 0 end
     end)
 
-    RunService.RenderStepped:Connect(function()
+    RunService.Heartbeat:Connect(function()
         if not souAtual() or not J.fly then return end
-        local r, h = hrp(), hum()
-        local cam = workspace.CurrentCamera
-        if not (r and cam) then return end
-        if not (bg and bg.Parent) then if not montarVoo() then return end end
-        if h and not h.PlatformStand then h.PlatformStand = true end
+        local T, h = hrp(), hum()
+        local camera = workspace.CurrentCamera
+        if not (T and camera) then return end
+        if not (bg and bg.Parent and bv and bv.Parent) then
+            if not montarVoo() then return end
+        end
+        if h then h.PlatformStand = true end
 
-        local maxvel = J.flyVel
-        local andando = (ctrl.l + ctrl.r) ~= 0 or (ctrl.f + ctrl.b) ~= 0
-                        or (ctrl.u + ctrl.d) ~= 0
-        -- a rampa: acelera enquanto segura, desacelera sozinho ao soltar
-        if andando then
-            speed = math.min(speed + 0.5 + (speed / maxvel), maxvel)
-        elseif speed > 0 then
-            speed = math.max(speed - 1, 0)
+        local vel = J.flyVel
+        local F, B = CONTROL.F * vel, CONTROL.B * vel
+        local L, R = CONTROL.L * vel, CONTROL.R * vel
+        local Q, E = CONTROL.Q * vel, CONTROL.E * vel
+        local mexendo = (L + R) ~= 0 or (F + B) ~= 0 or (Q + E) ~= 0
+
+        if mexendo then
+            SPEED = 50
+        elseif SPEED ~= 0 then
+            SPEED = 0
         end
 
-        local c = andando and ctrl or ultimo
-        if andando then
-            for k, v in pairs(ctrl) do ultimo[k] = v end
-        end
-        if speed > 0 then
-            local frente = cam.CFrame.LookVector * (c.f + c.b)
-            local lado = (cam.CFrame * CFrame.new(c.l + c.r, (c.f + c.b) * 0.2, 0).Position)
-                         - cam.CFrame.Position
-            bv.Velocity = (frente + lado + Vector3.new(0, c.u + c.d, 0)) * speed
+        if mexendo then
+            bv.Velocity = ((camera.CFrame.LookVector * (F + B))
+                + ((camera.CFrame * CFrame.new(L + R, (F + B + Q + E) * 0.2, 0).Position)
+                   - camera.CFrame.Position)) * SPEED
+            lCONTROL.F, lCONTROL.B = CONTROL.F, CONTROL.B
+            lCONTROL.L, lCONTROL.R = CONTROL.L, CONTROL.R
+            lCONTROL.Q, lCONTROL.E = CONTROL.Q, CONTROL.E
+        elseif SPEED ~= 0 then
+            local lF, lB = lCONTROL.F * vel, lCONTROL.B * vel
+            local lL, lR = lCONTROL.L * vel, lCONTROL.R * vel
+            local lQ, lE = lCONTROL.Q * vel, lCONTROL.E * vel
+            bv.Velocity = ((camera.CFrame.LookVector * (lF + lB))
+                + ((camera.CFrame * CFrame.new(lL + lR, (lF + lB + lQ + lE) * 0.2, 0).Position)
+                   - camera.CFrame.Position)) * SPEED
         else
-            bv.Velocity = Vector3.zero
+            bv.Velocity = Vector3.new(0, 0, 0)
         end
-        -- a inclinacao pra frente, proporcional a velocidade
-        bg.CFrame = cam.CFrame * CFrame.Angles(
-            -math.rad((c.f + c.b) * 50 * speed / maxvel), 0, 0)
+        bg.CFrame = camera.CFrame
     end)
 
     LP.CharacterAdded:Connect(function()
