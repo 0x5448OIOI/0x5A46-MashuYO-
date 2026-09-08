@@ -938,7 +938,7 @@ function Section:Dropdown(options)
 		valueLabel.Text = item
 		if options.Callback then task.spawn(options.Callback, item) end
 	end
-	for _, item in ipairs(items) do
+	local function criarEntrada(item)
 		local entry = new("TextButton", {
 			Size = UDim2.new(1, 0, 0, 26), BackgroundColor3 = Theme.Hover,
 			BackgroundTransparency = 1, AutoButtonColor = false,
@@ -961,6 +961,7 @@ function Section:Dropdown(options)
 			tween(arrow, { Rotation = 0 })
 		end)
 	end
+	for _, item in ipairs(items) do criarEntrada(item) end
 	field.MouseButton1Click:Connect(function()
 		open = not open
 		local height = open and (menuList.AbsoluteContentSize.Y + 8) or 0
@@ -970,6 +971,28 @@ function Section:Dropdown(options)
 	local api = {}
 	function api:Get() return selected end
 	function api:Set(item) choose(item) end
+	-- troca a lista sem refazer o componente. Serve pra lista que so
+	-- existe depois que o jogo carrega (NPC que entra e sai por
+	-- streaming, por exemplo).
+	function api:SetItems(novos, manterEscolha)
+		items = novos or {}
+		for _, c in ipairs(menu:GetChildren()) do
+			if c:IsA("TextButton") then c:Destroy() end
+		end
+		for _, item in ipairs(items) do criarEntrada(item) end
+		local aindaTem = false
+		for _, item in ipairs(items) do if item == selected then aindaTem = true break end end
+		if not (manterEscolha and aindaTem) then
+			selected = (aindaTem and selected) or items[1] or "None"
+			valueLabel.Text = selected
+		end
+		if open then
+			task.defer(function()
+				tween(menu, { Size = UDim2.new(1, 0, 0, menuList.AbsoluteContentSize.Y + 8) }, SMOOTH)
+			end)
+		end
+	end
+	function api:Items() return items end
 	self:_track({ Frame = holder, Name = options.Name or "Dropdown", Api = api })
 	return api
 end
@@ -2474,6 +2497,55 @@ local function disparar(nome, ...)
     return (pcall(function(...) ev:FireServer(nome, ...) end, ...))
 end
 
+-- MEDIDO: um CFrame solto NAO cola. Tive que repetir o set uns 8x pra
+-- o personagem realmente ficar la. Era esse o furo do "ir ao NPC".
+local function chegarPerto(raiz, alcance)
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not (hrp and raiz) then return nil end
+    local volta = hrp.CFrame
+    local fim = os.clock() + 3
+    while os.clock() < fim do
+        pcall(function() hrp.CFrame = raiz.CFrame * CFrame.new(0, 0, 3) end)
+        task.wait(0.1)
+        hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then return nil end
+        if (hrp.Position - raiz.Position).Magnitude <= (alcance or 6) then
+            task.wait(0.3)
+            return volta
+        end
+    end
+    return nil
+end
+local function raizDoNpc(nome)
+    local npcs = workspace:FindFirstChild("NPCS")
+    local npc = npcs and npcs:FindFirstChild(nome)
+    if not npc then return nil, nil end
+    return npc, (npc:FindFirstChild("HumanoidRootPart") or npc.PrimaryPart
+                 or npc:FindFirstChildWhichIsA("BasePart"))
+end
+-- MEDIDO: voltar logo depois da ida NAO cola. Se eu teleporto pro NPC e
+-- ja mando voltar, o servidor me devolve pro NPC — medi 276 studs fora
+-- do lugar. Com 1s de respiro e insistindo ~6s, a posicao assenta e
+-- volta certinho (medi distFinal = 0.0). Por isso e lento de proposito.
+local function voltarPara(cf)
+    if not cf then return false end
+    task.wait(1)
+    local fim = os.clock() + 6
+    while os.clock() < fim do
+        local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then return false end
+        pcall(function() hrp.CFrame = cf end)
+        task.wait(0.15)
+        hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+        if hrp and (hrp.Position - cf.Position).Magnitude <= 6 then
+            task.wait(0.4)
+            hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if hrp and (hrp.Position - cf.Position).Magnitude <= 8 then return true end
+        end
+    end
+    return false
+end
+
 local function botaoComTexto(...)
     local alvos = { ... }
     local dlg = LP.PlayerGui:FindFirstChild("ProximityPromptDialog")
@@ -2502,21 +2574,18 @@ local function esperarBotao(seg, ...)
 end
 
 local function irAoNpc(nome)
-    local npcs = workspace:FindFirstChild("NPCS")
-    local npc = npcs and npcs:FindFirstChild(nome)
-    local raiz = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-    if not (npc and raiz) then return nil end
-    local p = pontoDe(npc)
-    if not p then return nil end
-    local voltar = raiz.CFrame
-    local destino = p + Vector3.new(0, 0, 4) + Vector3.new(0, 2, 0)
-    pcall(function() raiz.CFrame = CFrame.lookAt(destino, Vector3.new(p.X, destino.Y, p.Z)) end)
-    task.wait(0.6)
-    -- abre a conversa: tenta o prompt e a tecla E, porque o prompt
-    -- sozinho nao abriu quando testei por script
+    local npc, raizNpc = raizDoNpc(nome)
+    if not raizNpc then return nil end
+    local voltar = chegarPerto(raizNpc, 6)
+    if not voltar then return nil end
+    -- MEDIDO: o prompt tem HoldDuration = 1.0. Chamar
+    -- fireproximityprompt(p) sem a duracao NAO abre a conversa —
+    -- era por isso que o caminho do NPC nao abria nada.
     for _, d in ipairs(npc:GetDescendants()) do
         if d:IsA("ProximityPrompt") then
-            pcall(function() if fireproximityprompt then fireproximityprompt(d) end end)
+            pcall(function()
+                if fireproximityprompt then fireproximityprompt(d, 1) end
+            end)
         end
     end
     pcall(function()
@@ -2566,6 +2635,15 @@ local function venderRemoto(tipo, qtd)
     local antes = contar()
     if antes <= 0 then return false end
 
+    -- MEDIDO: o servidor CHECA DISTANCIA. A 1313 studs os dois remotos
+    -- foram ignorados sem erro nenhum; a 4 studs do NPC vendeu na hora.
+    -- O que ele NAO exige e o dialogo: vendi com a conversa fechada.
+    -- Entao eu so encosto no NPC, disparo e volto. Sem menu, sem clique.
+    local _, raiz = raizDoNpc((tipo == "ore") and "Miner" or "Fisherman")
+    if not raiz then return false end
+    local volta = chegarPerto(raiz, 6)
+    if not volta then return false end
+
     if tipo == "ore" then
         -- minerio nao tem venda avulsa, so o vender-tudo
         disparar("SellAllOres")
@@ -2595,7 +2673,9 @@ local function venderRemoto(tipo, qtd)
 
     task.wait(0.9)
     dadosCache = nil
-    return contar() < antes
+    local caiu = contar() < antes
+    voltarPara(volta)
+    return caiu
 end
 
 -- qtd = nil ou >= o que tem  ->  usa o Sell All
@@ -2603,9 +2683,12 @@ local function vender(nome, aba, qtd)
     if vendendo then return false end
     vendendo = true
 
-    -- caminho novo primeiro: remoto, sem sair do lugar
+    -- caminho novo primeiro: encosta no NPC e dispara o remoto, sem
+    -- abrir menu nenhum. Dentro de pcall porque se isso estourar o
+    -- "vendendo" travava em true e a venda automatica morria calada.
     local tipo = (nome == "Miner") and "ore" or "fish"
-    if venderRemoto(tipo, qtd) then
+    local okR, feito = pcall(venderRemoto, tipo, qtd)
+    if okR and feito then
         vendendo = false
         avisar("Farm", "Sold your " .. (tipo == "ore" and "ores" or "fish"), 4)
         return true
@@ -2642,9 +2725,7 @@ local function vender(nome, aba, qtd)
     local x = botaoComTexto("x")
     if x then apertarPorSinal(x) end
     task.wait(0.3)
-    local raiz = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-    if raiz then pcall(function() raiz.CFrame = voltar end) end
-    task.wait(0.4)
+    voltarPara(voltar)
     vendendo = false
     avisar("Farm", ok and ("Sold your " .. (nome == "Miner" and "ores" or "fish"))
                      or ("Could not sell at the " .. nome), 4)
@@ -2771,8 +2852,900 @@ do
         Callback = function(v) C.venderMinerio = v salvar() end })
 end
 
+--==================================================================
+--                          TELEPORTE
+--==================================================================
+do
+    local abaTP = P.Tab("Teleport", "▲")
+
+    -- MEDIDO: workspace.NPCS so carrega quem esta perto (streaming).
+    -- Quando fui olhar tinha Docks, Fisherman, Merchant e Miner. O
+    -- Seller, o Merman e o JackOLantern existem (aparecem em
+    -- Configuration.Dialogs / ja vi o Seller na pasta) mas nao estavam
+    -- carregados. Entao eu nao chumbo lista: guardo quem eu ja vi e
+    -- gravo em arquivo, pra lista continuar cheia na proxima vez.
+    local ARQ_TP = "painel_0x5A46_npcs.json"
+    local APELIDO = {
+        Fisherman    = "Fishing",
+        Miner        = "Mining",
+        Merchant     = "Merchant",
+        Docks        = "Docks",
+        Seller       = "UGC Shop",
+        Merman       = "Merman",
+        JackOLantern = "Jack O'Lantern",
+    }
+    -- marcador de missao, nao e NPC
+    local IGNORAR = { ["Exclamation Mark"] = true }
+
+    -- posicoes que eu MEDI no jogo; o resto entra sozinho quando aparecer
+    local npcPos = {
+        Docks     = { 5008.5, 181.2, -108.2 },
+        Fisherman = { 4989.3, 180.1,  -84.6 },
+        Merchant  = { 5233.9, 192.0, -101.7 },
+        Miner     = { 4974.5, 180.3, -365.2 },
+    }
+    pcall(function()
+        if readfile and isfile and isfile(ARQ_TP) then
+            local d = Http:JSONDecode(readfile(ARQ_TP))
+            if type(d) == "table" then
+                for nome, p in pairs(d) do
+                    if type(p) == "table" and #p == 3 then npcPos[nome] = p end
+                end
+            end
+        end
+    end)
+    local pedidoTP = false
+    local function salvarNpcs()
+        if not writefile or pedidoTP then return end
+        pedidoTP = true
+        task.delay(1, function()
+            pedidoTP = false
+            pcall(function() writefile(ARQ_TP, Http:JSONEncode(npcPos)) end)
+        end)
+    end
+
+    local rotuloPara = {}
+    local function listaRotulos()
+        local nomes = {}
+        for n in pairs(npcPos) do nomes[#nomes + 1] = n end
+        table.sort(nomes, function(a, b)
+            return (APELIDO[a] or a) < (APELIDO[b] or b)
+        end)
+        local r = {}
+        rotuloPara = {}
+        for _, n in ipairs(nomes) do
+            local l = APELIDO[n] or n
+            rotuloPara[l] = n
+            r[#r + 1] = l
+        end
+        return r
+    end
+
+    local function varrer()
+        local pasta = workspace:FindFirstChild("NPCS")
+        if not pasta then return false end
+        local mudou = false
+        for _, c in ipairs(pasta:GetChildren()) do
+            if not IGNORAR[c.Name] then
+                local raiz = c:FindFirstChild("HumanoidRootPart")
+                    or (c:IsA("Model") and (c.PrimaryPart or c:FindFirstChildWhichIsA("BasePart")))
+                if raiz then
+                    local p, ant = raiz.Position, npcPos[c.Name]
+                    if not ant or (Vector3.new(ant[1], ant[2], ant[3]) - p).Magnitude > 3 then
+                        npcPos[c.Name] = { p.X, p.Y, p.Z }
+                        mudou = true
+                    end
+                end
+            end
+        end
+        return mudou
+    end
+
+    local function irPara(nomeReal)
+        local pasta = workspace:FindFirstChild("NPCS")
+        local npc = pasta and pasta:FindFirstChild(nomeReal)
+        local raiz = npc and (npc:FindFirstChild("HumanoidRootPart")
+            or npc.PrimaryPart or npc:FindFirstChildWhichIsA("BasePart"))
+        if raiz then return chegarPerto(raiz, 6) ~= nil end
+        -- NPC nao carregado: vou pela posicao guardada. Mesmo martelo do
+        -- voltarPara, porque um CFrame solto nao cola.
+        local g = npcPos[nomeReal]
+        if not g then return false end
+        local destino = CFrame.new(g[1], g[2] + 3, g[3])
+        local fim = os.clock() + 6
+        while os.clock() < fim do
+            local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if not hrp then return false end
+            pcall(function() hrp.CFrame = destino end)
+            task.wait(0.15)
+            hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if hrp and (hrp.Position - destino.Position).Magnitude <= 8 then
+                task.wait(0.4)
+                return true
+            end
+        end
+        return false
+    end
+
+    -- teleporte cru, pra ponto do mapa. Mesmo martelo: um CFrame solto
+    -- nao cola, tem que insistir ate a posicao assentar.
+    local function irAoPonto(x, y, z)
+        local destino = CFrame.new(x, y, z)
+        local fim = os.clock() + 6
+        while os.clock() < fim do
+            local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if not hrp then return false end
+            pcall(function() hrp.CFrame = destino end)
+            task.wait(0.15)
+            hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if hrp and (hrp.Position - destino.Position).Magnitude <= 8 then
+                task.wait(0.4)
+                return true
+            end
+        end
+        return false
+    end
+
+    local sec = abaTP:Section("NPCs", nil, 1)
+    local dd = sec:Dropdown({ Name = "NPC", Items = listaRotulos() })
+    sec:Button({ Name = "Teleport", Callback = function()
+        task.spawn(function()
+            local escolha = dd:Get()
+            local alvo = rotuloPara[escolha]
+            if not alvo then avisar("Teleport", "Pick an NPC first", 3) return end
+            if not irPara(alvo) then
+                avisar("Teleport", "Could not reach " .. escolha, 4)
+            end
+        end)
+    end })
+
+    --------------------------------------------------------------
+    --                         LUGARES
+    --------------------------------------------------------------
+    -- Os lugares vem de posicao pura, nao de objeto do mapa, entao
+    -- funcionam mesmo com a regiao descarregada.
+    local ARQ_LUG = "painel_0x5A46_lugares.json"
+    -- MEDIDO no jogo, um por um
+    local lugares = {
+        ["Campfire"]     = { 4949, 228, -407 },
+        ["Campfire 2"]   = { 5302, 252, -281 },
+        ["Old Campfire"] = { 5269, 191, -54 },
+        ["Fountain"]     = { 5116, 195, -237 },
+        ["Spawn"]        = { 5101, 194, -48 },
+        ["Kitchen"]      = { 5325, 256, -312 },
+        ["Mill"]         = { 5366, 262, -259 },
+        ["Docks"]        = { 4992, 181, -85 },
+        ["Kiosk"]        = { 4948, 228, 120 },
+        -- voce foi la e eu li a posicao (fica colada no Kiosk)
+        ["Tower"]        = { 4911, 229, 154 },
+        ["Mining field"] = { 4940, 182, -400 },
+        -- tirei o "Boat spawn": testei e o ponto e agua funda, o
+        -- personagem afundava 300 studs e ficava nadando no escuro
+        -- voce foi na quadra e eu li a posicao. Era perto do modelo
+        -- "Dodgeball" que eu tinha achado, mas 16 studs acima: se eu
+        -- tivesse chutado o modelo voce cairia embaixo da quadra.
+        ["Dodgeball"]    = { 5188, 203, -519 },
+        ["Sewage"]       = { 4836, -7, -122 },
+    }
+
+    -- O dirigivel VOA (medi 14 studs/s, 28.8 studs em 2 segundos), entao
+    -- posicao fixa nao serve: tem que achar ele na hora. Sao dois,
+    -- Driver1 e Driver2, em Map.All Map Details.Baloons. O Driver1 tem
+    -- uma parte "Zone" que e onde da pra ficar em pe.
+    local function acharBalao(qual)
+        local m = workspace:FindFirstChild("Map")
+        m = m and m:FindFirstChild("All Map Details")
+        m = m and m:FindFirstChild("Baloons")
+        local d = m and m:FindFirstChild(qual)
+        if not d then return nil end
+        local corpo = d:FindFirstChild("Body") or d
+        return corpo:FindFirstChild("Zone", true)
+            or corpo:FindFirstChild("Cockpit", true)
+            or corpo:FindFirstChildWhichIsA("BasePart", true)
+    end
+    -- entra em cima do que esta se mexendo: fica grudando por ~2s ate o
+    -- personagem pousar junto, senao ele nasce no ar e cai.
+    local function subirEm(parte)
+        if not parte then return false end
+        local fim = os.clock() + 2.5
+        while os.clock() < fim do
+            local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+            if not hrp or not parte.Parent then return false end
+            pcall(function()
+                hrp.CFrame = parte.CFrame * CFrame.new(0, parte.Size.Y / 2 + 4, 0)
+            end)
+            task.wait(0.08)
+        end
+        return true
+    end
+    local ESPECIAIS = {
+        ["Blimp 1"] = function() return subirEm(acharBalao("Driver1")) end,
+        ["Blimp 2"] = function() return subirEm(acharBalao("Driver2")) end,
+    }
+    pcall(function()
+        if readfile and isfile and isfile(ARQ_LUG) then
+            local d = Http:JSONDecode(readfile(ARQ_LUG))
+            if type(d) == "table" then
+                for nome, p in pairs(d) do
+                    if type(p) == "table" and #p == 3 then lugares[nome] = p end
+                end
+            end
+        end
+    end)
+    local pedidoLug = false
+    local function salvarLugares()
+        if not writefile or pedidoLug then return end
+        pedidoLug = true
+        task.delay(1, function()
+            pedidoLug = false
+            pcall(function() writefile(ARQ_LUG, Http:JSONEncode(lugares)) end)
+        end)
+    end
+    local function listaLugares()
+        local n = {}
+        for k in pairs(lugares) do n[#n + 1] = k end
+        for k in pairs(ESPECIAIS) do n[#n + 1] = k end
+        table.sort(n)
+        return n
+    end
+
+    local sec2 = abaTP:Section("Places", nil, 2)
+    local dl = sec2:Dropdown({ Name = "Place", Items = listaLugares() })
+    sec2:Button({ Name = "Teleport", Callback = function()
+        task.spawn(function()
+            local nome = dl:Get()
+            local esp = ESPECIAIS[nome]
+            if esp then
+                if not esp() then avisar("Teleport", nome .. " is not around right now", 4) end
+                return
+            end
+            local p = lugares[nome]
+            if not p then avisar("Teleport", "Pick a place first", 3) return end
+            if not irAoPonto(p[1], p[2], p[3]) then
+                avisar("Teleport", "Could not reach " .. nome, 4)
+            end
+        end)
+    end })
+
+    -- pra voce mesmo marcar lugar novo sem depender de mim: escreve o
+    -- nome, aperta Save e ele guarda onde voce esta em pe.
+    local caixa = sec2:Input({ Name = "New place", Placeholder = "name it, then Save" })
+    sec2:Button({ Name = "Save my spot", Callback = function()
+        local nome = (caixa.Text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if nome == "" then avisar("Teleport", "Type a name first", 3) return end
+        local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        local p = hrp.Position
+        lugares[nome] = { p.X, p.Y, p.Z }
+        salvarLugares()
+        dl:SetItems(listaLugares(), true)
+        caixa.Text = ""
+        avisar("Teleport", "Saved " .. nome, 3)
+    end })
+    sec2:Button({ Name = "Delete selected", Callback = function()
+        local nome = dl:Get()
+        if not lugares[nome] then return end   -- os especiais nao saem
+        lugares[nome] = nil
+        salvarLugares()
+        dl:SetItems(listaLugares())
+        avisar("Teleport", "Removed " .. nome, 3)
+    end })
+
+    --------------------------------------------------------------
+    --                         JOGADORES
+    --------------------------------------------------------------
+    -- Aqui e alvo que anda, entao nao adianta guardar posicao: leio o
+    -- HumanoidRootPart na hora. Chego atras da pessoa (offset -3 no Z
+    -- dela) pra nao nascer em cima e empurrar.
+    local sec3 = abaTP:Section("Players", nil, 1)
+    local function listaJogadores()
+        local n = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP then n[#n + 1] = p.Name end
+        end
+        table.sort(n)
+        if #n == 0 then n[1] = "nobody else here" end
+        return n
+    end
+    local dj = sec3:Dropdown({ Name = "Player", Items = listaJogadores() })
+    sec3:Button({ Name = "Teleport", Callback = function()
+        task.spawn(function()
+            local nome = dj:Get()
+            local alvo = Players:FindFirstChild(nome)
+            if not alvo or alvo == LP then
+                avisar("Teleport", "Pick a player first", 3) return
+            end
+            local ch = alvo.Character
+            local raiz = ch and ch:FindFirstChild("HumanoidRootPart")
+            if not raiz then
+                avisar("Teleport", nome .. " has no character right now", 4) return
+            end
+            local fim = os.clock() + 6
+            while os.clock() < fim do
+                local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                if not hrp then return end
+                if not raiz.Parent then
+                    avisar("Teleport", nome .. " disappeared", 4) return
+                end
+                pcall(function() hrp.CFrame = raiz.CFrame * CFrame.new(0, 0, 3) end)
+                task.wait(0.15)
+                hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                if hrp and (hrp.Position - raiz.Position).Magnitude <= 8 then
+                    task.wait(0.4)
+                    return
+                end
+            end
+            avisar("Teleport", "Could not reach " .. nome, 4)
+        end)
+    end })
+    local function atualizarJogadores()
+        dj:SetItems(listaJogadores(), true)
+    end
+    Players.PlayerAdded:Connect(atualizarJogadores)
+    Players.PlayerRemoving:Connect(function() task.delay(0.5, atualizarJogadores) end)
+
+    task.spawn(function()
+        while souAtual() do
+            if varrer() then
+                salvarNpcs()
+                dd:SetItems(listaRotulos(), true)
+            end
+            task.wait(3)
+        end
+    end)
+end
+
 win:Select(aba)
 
 getgenv().Pesca5A46 = { cfg = C, stat = stat, mina = statMina, estado = estado }
 print("[0x5A46] auto fish ready · F toggles · State = " .. estado())
 avisar("Farm", "F = auto fish · G = auto mine", 5)
+--[[=================================================================
+    PLAYER  ·  aba do painel 0x5A46
+    -------------------------------------------------------------------
+    Tudo aqui e do lado do cliente. Duas consequencias que valem saber:
+
+      - WalkSpeed / JumpPower: muitos jogos resetam isso. Por isso eu
+        nao seto uma vez, eu reponho todo frame enquanto estiver ligado.
+      - Ragdoll e Spin: sao efeitos locais. Voce ve, os outros podem nao
+        ver (depende do que o jogo replica).
+
+    As protecoes (anti fling / anti bang / anti force / anti void) sao
+    todas defensivas: elas so apagam coisa que apareceu DENTRO do seu
+    personagem e que nao foi voce que criou.
+===================================================================]]
+
+local P = getgenv().Painel5A46
+if not P then return end
+local souAtual = P.souAtual
+local win = P.win
+local function avisar(t, x, s) P.notify(t, x, s or 3) end
+
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS        = game:GetService("UserInputService")
+local LP = Players.LocalPlayer
+
+local function char()   return LP.Character end
+local function hrp()
+    local c = char()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function hum()
+    local c = char()
+    return c and c:FindFirstChildWhichIsA("Humanoid")
+end
+
+local J = {
+    velocidade = 16,   -- WalkSpeed padrao do Roblox
+    pulo       = 50,   -- JumpPower padrao
+    velOn      = false,
+    puloOn     = false,
+    noclip     = false,
+    antiFling  = false,
+    antiBang   = false,
+    antiForce  = false,
+    antiVoid   = false,
+    verInvis   = false,
+    ragdoll    = false,
+    spin       = false,
+    spinVel    = 8,
+    fly        = false,
+    flyVel     = 60,
+    clickTP    = false,
+}
+
+local abaJog = P.Tab("Player", "●")
+
+--==================================================================
+--                        MOVIMENTO
+--==================================================================
+do
+    local sec = abaJog:Section("Movement", nil, 1)
+
+    sec:Toggle({ Name = "WalkSpeed", Default = false, Bell = false,
+        Callback = function(v)
+            J.velOn = v
+            local h = hum()
+            if not v and h then h.WalkSpeed = 16 end
+        end })
+    sec:Slider({ Name = "Speed", Min = 16, Max = 200, Default = 16,
+        Callback = function(v) J.velocidade = v end })
+
+    -- MEDIDO: este jogo usa JumpHeight (UseJumpPower = false,
+    -- JumpHeight = 7.2), nao JumpPower. Se eu forcasse UseJumpPower =
+    -- true eu trocaria o modelo de pulo do jogo. Entao eu respeito o
+    -- modo que estiver e converto quando precisar.
+    sec:Toggle({ Name = "Jump", Default = false, Bell = false,
+        Callback = function(v)
+            J.puloOn = v
+            local h = hum()
+            if not v and h then
+                if h.UseJumpPower then h.JumpPower = 50 else h.JumpHeight = 7.2 end
+            end
+        end })
+    sec:Slider({ Name = "Jump height", Min = 7, Max = 120, Default = 7,
+        Callback = function(v) J.pulo = v end })
+
+    -- reponho todo frame: se o jogo resetar, eu volto a por
+    RunService.Heartbeat:Connect(function()
+        if not souAtual() then return end
+        local h = hum()
+        if not h then return end
+        if J.velOn and h.WalkSpeed ~= J.velocidade then h.WalkSpeed = J.velocidade end
+        if J.puloOn then
+            if h.UseJumpPower then
+                -- altura -> forca:  v = raiz(2 * g * h),  g = 196.2
+                local forca = math.sqrt(2 * 196.2 * J.pulo)
+                if math.abs(h.JumpPower - forca) > 0.5 then h.JumpPower = forca end
+            elseif h.JumpHeight ~= J.pulo then
+                h.JumpHeight = J.pulo
+            end
+        end
+    end)
+
+    ---------------------------------------------------------- fly
+    -- Refeito no estilo do Infinite Yield (o fly classico do Rocky2u).
+    -- O que faz ele parecer "molhado" e nao seco:
+    --   1) a velocidade NAO e ligado/desligado, ela sobe numa rampa
+    --      (speed += 0.5 + speed/maxspeed) e desce sozinha quando voce
+    --      solta a tecla, entao tem arranque e tem deriva;
+    --   2) um BodyGyro segura o corpo virado pra camera e INCLINA ele
+    --      pra frente proporcional a velocidade — e essa inclinacao que
+    --      da a sensacao de estar voando de verdade;
+    --   3) quando voce solta tudo, ele continua na ultima direcao ate a
+    --      velocidade zerar, em vez de parar no ar de uma vez.
+    -- Aqui eu PRECISO de BodyGyro/BodyVelocity de verdade (e a fisica
+    -- deles que suaviza). Como o Anti force apaga esse tipo de coisa, eu
+    -- batizo as minhas de "0x5A46_" e o Anti force pula esse prefixo.
+    local bg, bv
+    local ctrl  = { f = 0, b = 0, l = 0, r = 0, u = 0, d = 0 }
+    local ultimo = { f = 0, b = 0, l = 0, r = 0, u = 0, d = 0 }
+    local speed = 0
+
+    local function limparVoo()
+        if bg then bg:Destroy() bg = nil end
+        if bv then bv:Destroy() bv = nil end
+        speed = 0
+        for k in pairs(ctrl) do ctrl[k] = 0 ultimo[k] = 0 end
+    end
+    local function montarVoo()
+        local r = hrp()
+        if not r then return false end
+        limparVoo()
+        bg = Instance.new("BodyGyro")
+        bg.Name = "0x5A46_flyGyro"
+        bg.P = 9e4
+        bg.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+        bg.CFrame = r.CFrame
+        bg.Parent = r
+        bv = Instance.new("BodyVelocity")
+        bv.Name = "0x5A46_flyVel"
+        bv.Velocity = Vector3.new(0, 0.1, 0)
+        bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+        bv.Parent = r
+        return true
+    end
+
+    sec:Toggle({ Name = "Fly", Default = false, Bell = false,
+        Keybind = { Key = Enum.KeyCode.X },
+        Callback = function(v)
+            J.fly = v
+            local h = hum()
+            if v then
+                if not montarVoo() then J.fly = false return end
+                if h then h.PlatformStand = true end
+            else
+                limparVoo()
+                if h then h.PlatformStand = J.ragdoll end
+            end
+        end })
+    sec:Slider({ Name = "Fly speed", Min = 20, Max = 300, Default = 50,
+        Callback = function(v) J.flyVel = v end })
+
+    local MAPA = {
+        [Enum.KeyCode.W] = { "f",  1 }, [Enum.KeyCode.S] = { "b", -1 },
+        [Enum.KeyCode.A] = { "l", -1 }, [Enum.KeyCode.D] = { "r",  1 },
+        [Enum.KeyCode.Space] = { "u", 1 }, [Enum.KeyCode.LeftShift] = { "d", -1 },
+    }
+    UIS.InputBegan:Connect(function(i, digitando)
+        if digitando or not J.fly then return end
+        local m = MAPA[i.KeyCode]
+        if m then ctrl[m[1]] = m[2] end
+    end)
+    UIS.InputEnded:Connect(function(i)
+        local m = MAPA[i.KeyCode]
+        if m then ctrl[m[1]] = 0 end
+    end)
+
+    RunService.RenderStepped:Connect(function()
+        if not souAtual() or not J.fly then return end
+        local r, h = hrp(), hum()
+        local cam = workspace.CurrentCamera
+        if not (r and cam) then return end
+        if not (bg and bg.Parent) then if not montarVoo() then return end end
+        if h and not h.PlatformStand then h.PlatformStand = true end
+
+        local maxvel = J.flyVel
+        local andando = (ctrl.l + ctrl.r) ~= 0 or (ctrl.f + ctrl.b) ~= 0
+                        or (ctrl.u + ctrl.d) ~= 0
+        -- a rampa: acelera enquanto segura, desacelera sozinho ao soltar
+        if andando then
+            speed = math.min(speed + 0.5 + (speed / maxvel), maxvel)
+        elseif speed > 0 then
+            speed = math.max(speed - 1, 0)
+        end
+
+        local c = andando and ctrl or ultimo
+        if andando then
+            for k, v in pairs(ctrl) do ultimo[k] = v end
+        end
+        if speed > 0 then
+            local frente = cam.CFrame.LookVector * (c.f + c.b)
+            local lado = (cam.CFrame * CFrame.new(c.l + c.r, (c.f + c.b) * 0.2, 0).Position)
+                         - cam.CFrame.Position
+            bv.Velocity = (frente + lado + Vector3.new(0, c.u + c.d, 0)) * speed
+        else
+            bv.Velocity = Vector3.zero
+        end
+        -- a inclinacao pra frente, proporcional a velocidade
+        bg.CFrame = cam.CFrame * CFrame.Angles(
+            -math.rad((c.f + c.b) * 50 * speed / maxvel), 0, 0)
+    end)
+
+    LP.CharacterAdded:Connect(function()
+        task.wait(0.6)
+        if J.fly then
+            montarVoo()
+            local h = hum()
+            if h then h.PlatformStand = true end
+        end
+    end)
+
+    sec:Toggle({ Name = "Noclip", Default = false, Bell = false,
+        Callback = function(v)
+            J.noclip = v
+            if not v then
+                local c = char()
+                if c then
+                    for _, d in ipairs(c:GetDescendants()) do
+                        if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
+                            d.CanCollide = true
+                        end
+                    end
+                end
+            end
+        end })
+    RunService.Stepped:Connect(function()
+        if not souAtual() or not J.noclip then return end
+        local c = char()
+        if not c then return end
+        for _, d in ipairs(c:GetDescendants()) do
+            if d:IsA("BasePart") and d.CanCollide then d.CanCollide = false end
+        end
+    end)
+end
+
+--==================================================================
+--                        PROTECOES
+--==================================================================
+do
+    local sec = abaJog:Section("Protection", nil, 2)
+
+    ---------------------------------------------------------- fling
+    -- Fling e sempre a mesma receita: alguem empurra uma velocidade
+    -- absurda no seu personagem. Entao eu vigio a velocidade e corto
+    -- quando passa do que um jogador consegue fazer andando.
+    local TETO_GIRO, TETO_VEL = 40, 250
+    sec:Toggle({ Name = "Anti fling", Default = false, Bell = false,
+        Callback = function(v) J.antiFling = v end })
+    RunService.Heartbeat:Connect(function()
+        if not souAtual() or not J.antiFling then return end
+        local r = hrp()
+        if not r then return end
+        if r.AssemblyAngularVelocity.Magnitude > TETO_GIRO then
+            r.AssemblyAngularVelocity = Vector3.zero
+        end
+        -- voando sou EU que escrevo a velocidade, entao nao corto a
+        -- minha propria (o voo chega a 300 e o teto aqui e 250)
+        if not J.fly and r.AssemblyLinearVelocity.Magnitude > TETO_VEL then
+            local d = r.AssemblyLinearVelocity.Unit * TETO_VEL
+            r.AssemblyLinearVelocity = Vector3.new(d.X, r.AssemblyLinearVelocity.Y, d.Z)
+        end
+        -- o PlatformStand e legitimo quando eu mesmo liguei (voo/ragdoll)
+        local h = hum()
+        if h and h.PlatformStand and not J.ragdoll and not J.fly then
+            h.PlatformStand = false
+        end
+    end)
+
+    ---------------------------------------------------------- force
+    -- Qualquer "motor" que aparecer dentro de voce e coisa de fora:
+    -- voce nao cria BodyVelocity em si mesmo. Apago na hora que nasce.
+    local FORCA = {
+        BodyVelocity = true, BodyForce = true, BodyGyro = true,
+        BodyPosition = true, BodyAngularVelocity = true, BodyThrust = true,
+        VectorForce = true, LinearVelocity = true, AngularVelocity = true,
+        AlignPosition = true, AlignOrientation = true, Torque = true,
+    }
+    sec:Toggle({ Name = "Anti force", Default = false, Bell = false,
+        Callback = function(v) J.antiForce = v end })
+
+    ---------------------------------------------------------- bang
+    -- ATENCAO, isso aqui quase virou um bug feio. Meu primeiro plano era
+    -- "apaga toda solda que nascer dentro de voce e nao estava la no
+    -- spawn". Fui medir e:
+    --   1) este personagem nasce com ZERO junta (o jogo monta o R15 sem
+    --      Motor6D visivel), entao TODA solda seria "nova";
+    --   2) equipar a vara cria RightGrip no RightHand mais uns 40
+    --      BTWeld/Motor6D dentro da propria vara.
+    -- Ou seja: eu teria destruido a vara e a picareta toda vez que voce
+    -- equipasse, e matado a pescaria inteira.
+    -- O que identifica um bang de verdade e outra coisa: uma junta que
+    -- liga um pedaco SEU a um pedaco de OUTRO jogador. E so isso que eu
+    -- apago. Ferramenta nao encosta nisso.
+    local COLA = {
+        Weld = true, WeldConstraint = true, ManualWeld = true,
+        Motor = true, Motor6D = true, Snap = true,
+        BallSocketConstraint = true, HingeConstraint = true,
+        Rope = true, RodConstraint = true,
+    }
+    local function donoDaParte(parte)
+        if not parte then return nil end
+        local m = parte:FindFirstAncestorOfClass("Model")
+        while m do
+            local p = Players:GetPlayerFromCharacter(m)
+            if p then return p end
+            m = m:FindFirstAncestorOfClass("Model")
+        end
+        return nil
+    end
+    -- serve pra Weld/Motor6D (Part0/Part1) e pra constraint (Attachment)
+    local function pontas(d)
+        local a, b = nil, nil
+        pcall(function() a, b = d.Part0, d.Part1 end)
+        if not a then
+            pcall(function()
+                a = d.Attachment0 and d.Attachment0.Parent
+                b = d.Attachment1 and d.Attachment1.Parent
+            end)
+        end
+        return a, b
+    end
+    local function ehBang(d)
+        if d:FindFirstAncestorWhichIsA("Tool") then return false end
+        if d.Name == "RightGrip" or d.Name == "LeftGrip" then return false end
+        local a, b = pontas(d)
+        local da, db = donoDaParte(a), donoDaParte(b)
+        -- so incomoda se juntar VOCE com OUTRA PESSOA
+        return (da == LP and db ~= nil and db ~= LP)
+            or (db == LP and da ~= nil and da ~= LP)
+    end
+    sec:Toggle({ Name = "Anti bang", Default = false, Bell = false,
+        Callback = function(v) J.antiBang = v end })
+
+    -- a solda pode nascer dentro de voce OU dentro do personagem dele.
+    -- Por isso eu olho os dois lados: o meu por evento, e o dos vizinhos
+    -- de perto por varredura (bang precisa estar colado).
+    local function vigiarMeu(c)
+        c.DescendantAdded:Connect(function(d)
+            task.defer(function()
+                if not d.Parent then return end
+                -- "0x5A46_" e coisa minha (o voo). Se eu nao pulasse
+                -- isso, o Anti force apagaria o meu proprio BodyGyro.
+                if J.antiForce and FORCA[d.ClassName]
+                    and not d.Name:find("0x5A46_", 1, true)
+                    and not d:FindFirstAncestorWhichIsA("Tool") then
+                    pcall(function() d:Destroy() end)
+                    avisar("Player", "Blocked a " .. d.ClassName, 3)
+                elseif J.antiBang and COLA[d.ClassName] and ehBang(d) then
+                    pcall(function() d:Destroy() end)
+                    avisar("Player", "Blocked someone welding to you", 3)
+                end
+            end)
+        end)
+    end
+    if char() then vigiarMeu(char()) end
+    LP.CharacterAdded:Connect(function(c) task.wait(0.2) vigiarMeu(c) end)
+
+    task.spawn(function()
+        while true do
+            task.wait(0.4)
+            if souAtual() and J.antiBang then
+                local r = hrp()
+                if r then
+                    for _, p in ipairs(Players:GetPlayers()) do
+                        local pc = p ~= LP and p.Character
+                        local pr = pc and pc:FindFirstChild("HumanoidRootPart")
+                        -- so quem esta colado; bang exige encostar
+                        if pr and (pr.Position - r.Position).Magnitude < 20 then
+                            for _, d in ipairs(pc:GetDescendants()) do
+                                if COLA[d.ClassName] and ehBang(d) then
+                                    pcall(function() d:Destroy() end)
+                                    avisar("Player", "Blocked " .. p.Name, 3)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    ---------------------------------------------------------- void
+    -- guardo a ultima posicao boa e devolvo se voce passar do limite
+    sec:Toggle({ Name = "Anti void", Default = false, Bell = false,
+        Callback = function(v) J.antiVoid = v end })
+    local ultimaBoa = nil
+    task.spawn(function()
+        while souAtual() do
+            task.wait(0.5)
+            local r, h = hrp(), hum()
+            if r and h and h.Health > 0 and r.Position.Y > -50 then
+                ultimaBoa = r.CFrame
+            end
+        end
+    end)
+    RunService.Heartbeat:Connect(function()
+        if not souAtual() or not J.antiVoid then return end
+        local r = hrp()
+        if not r then return end
+        -- o mapa mais fundo que eu medi aqui foi o esgoto, em Y = -12.
+        -- Abaixo de -180 nao existe chao nenhum: e queda pro vazio.
+        if r.Position.Y < -180 and ultimaBoa then
+            pcall(function()
+                r.AssemblyLinearVelocity = Vector3.zero
+                r.CFrame = ultimaBoa
+            end)
+            avisar("Player", "Pulled you out of the void", 3)
+        end
+    end)
+
+    ---------------------------------------------- ver invisivel
+    -- Nao mexo na transparencia dos outros (o jogo usa isso pra coisa
+    -- legitima). Marco com Highlight so quem sumiu inteiro.
+    sec:Toggle({ Name = "Show invisible", Default = false, Bell = false,
+        Callback = function(v)
+            J.verInvis = v
+            if not v then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    local c = p.Character
+                    local m = c and c:FindFirstChild("0x5A46_invis")
+                    if m then m:Destroy() end
+                end
+            end
+        end })
+    task.spawn(function()
+        while true do
+            task.wait(1)
+            if souAtual() and J.verInvis then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= LP and p.Character then
+                        local c = p.Character
+                        local visivel, total = 0, 0
+                        for _, d in ipairs(c:GetChildren()) do
+                            if d:IsA("BasePart") and d.Name ~= "HumanoidRootPart" then
+                                total = total + 1
+                                if d.Transparency < 0.9 then visivel = visivel + 1 end
+                            end
+                        end
+                        local marca = c:FindFirstChild("0x5A46_invis")
+                        if total > 0 and visivel == 0 then
+                            if not marca then
+                                local hl = Instance.new("Highlight")
+                                hl.Name = "0x5A46_invis"
+                                hl.FillTransparency = 0.6
+                                hl.OutlineTransparency = 0
+                                hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+                                hl.Adornee = c
+                                hl.Parent = c
+                            end
+                        elseif marca then
+                            marca:Destroy()
+                        end
+                    end
+                end
+            end
+        end
+    end)
+end
+
+--==================================================================
+--                          BRINQUEDOS
+--==================================================================
+do
+    local sec = abaJog:Section("Fun", nil, 1)
+
+    ---------------------------------------------------------- ragdoll
+    -- PlatformStand e o ragdoll "de mentira": desliga o controle do
+    -- Humanoid e o corpo cai. E local — pode ser que so voce veja.
+    sec:Toggle({ Name = "Ragdoll", Default = false, Bell = false,
+        Callback = function(v)
+            J.ragdoll = v
+            local h = hum()
+            if h then h.PlatformStand = v or J.fly end
+        end })
+    LP.CharacterAdded:Connect(function()
+        task.wait(0.5)
+        local h = hum()
+        if h and J.ragdoll then h.PlatformStand = true end
+    end)
+
+    ---------------------------------------------------------- spin
+    sec:Toggle({ Name = "Spin", Default = false, Bell = false,
+        Callback = function(v) J.spin = v end })
+    sec:Slider({ Name = "Spin speed", Min = 1, Max = 40, Default = 8,
+        Callback = function(v) J.spinVel = v end })
+    local giro = 0
+    RunService.Heartbeat:Connect(function(dt)
+        if not souAtual() or not J.spin then return end
+        local r, h = hrp(), hum()
+        if not r then return end
+        -- o AutoRotate briga com CFrame manual no mesmo frame, entao
+        -- desligo enquanto estiver girando (aprendi isso no Gakuran)
+        if h and h.AutoRotate then h.AutoRotate = false end
+        giro = giro + dt * J.spinVel
+        pcall(function()
+            r.CFrame = CFrame.new(r.Position) * CFrame.Angles(0, giro, 0)
+        end)
+    end)
+    -- devolve o AutoRotate quando desligar
+    task.spawn(function()
+        while true do
+            task.wait(0.4)
+            if souAtual() and not J.spin then
+                local h = hum()
+                if h and not h.AutoRotate then h.AutoRotate = true end
+            end
+        end
+    end)
+end
+
+--==================================================================
+--                          CLICK TP
+--==================================================================
+do
+    local sec = abaJog:Section("Click TP", nil, 2)
+    sec:Toggle({ Name = "Click TP", Default = false, Bell = false,
+        Callback = function(v) J.clickTP = v end })
+    -- fica escrito embaixo, ai nao precisa de notificacao toda vez
+    sec:Label("Ctrl + Click")
+
+    -- pedi Ctrl junto de proposito: sem isso todo clique no jogo
+    -- (pescar, minerar, apertar botao) viraria teleporte.
+    local mouse = LP:GetMouse()
+    mouse.Button1Down:Connect(function()
+        if not souAtual() or not J.clickTP then return end
+        if not (UIS:IsKeyDown(Enum.KeyCode.LeftControl)
+             or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then return end
+        local r = hrp()
+        if not r then return end
+        local alvo = mouse.Hit
+        if not alvo then return end
+        pcall(function()
+            r.CFrame = CFrame.new(alvo.Position + Vector3.new(0, 3, 0))
+        end)
+    end)
+end
+
+getgenv().Jogador5A46 = J
