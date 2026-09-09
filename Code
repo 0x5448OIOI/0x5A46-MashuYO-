@@ -1719,7 +1719,7 @@ workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     if workspace.CurrentCamera then Camera = workspace.CurrentCamera end
 end)
 
-win.Title = "0x5A46  ·  MushYO"
+win.Title = "0x5A46  ·  Farm"
 pcall(function() win.TitleLabel.Text = win.Title end)
 
 --==================================================================
@@ -4714,9 +4714,10 @@ end
 --==================================================================
 --                            A ABA
 --==================================================================
+-- uma aba so pros dois minigames; cada um e uma secao dentro dela
+local abaMini = P.Tab("Minigames", "◆")
 do
-    local aba = P.Tab("Minigames", "◆")
-    local sec = aba:Section("Dodgeball", nil, 1)
+    local sec = abaMini:Section("Dodgeball", nil, 1)
 
     if not instalado then
         sec:Info("Dodgeball events not found in this place.", 34)
@@ -4752,6 +4753,196 @@ do
         end)
     end
 end
+
+--==================================================================
+--                          SINUCA
+--==================================================================
+-- MEDIDO no jogo, tacada por tacada:
+--   O envio e  Strike.Fire({ Table = <a mesa>, Heading = <Vector3
+--   unitario do MUNDO, Y=0>, Power = <0 a 1> }).
+--   Isso eu li gravando DUAS tacadas suas de verdade:
+--     {Heading=(-0.224, 0, 0.974), Power=1}
+--     {Heading=(-0.561, 0, -0.828), Power=0.527}
+--   Eu tinha assumido angulo e impulso. Estava errado nos dois.
+--   Confirmei mandando uma: Power=0.5 foi aceita, SnookerBusy virou
+--   true, a branca andou e o turno passou.
+--
+--   As bolas sao ANCORADAS: quem move e o servidor pelo evento Snap.
+--   Por isso nao adianta ler velocidade delas, so posicao.
+--
+--   Mesa (de BuildFrame): meia-longa 6.45, meia-curta 3.26,
+--   raio da bola 0.180, raio da cacapa 0.468, 6 cacapas (4 cantos +
+--   2 no meio das bordas longas).
+--
+-- A mira e "bola fantasma": pra encacapar a bola T na cacapa C, a
+-- branca tem que chegar no ponto que fica a 2 raios ATRAS de T, na
+-- linha T->C. Eu nao uso o simulador do jogo (o ApplyStrike dele nao
+-- respondeu a nenhum formato que testei) — isso aqui e geometria.
+local S = {
+    ligado = false,
+    corte  = 75,     -- angulo maximo de corte que aceito, em graus
+    forca  = 1.0,    -- multiplicador da forca calculada
+    tacadas = 0,
+}
+
+local function mesaAtual()
+    local sn = workspace:FindFirstChild("Snookers")
+    if not sn then return nil end
+    for _, t in ipairs(sn:GetChildren()) do
+        if t:GetAttribute("ShooterId") and t:FindFirstChild("Balls") then return t end
+    end
+    return nil
+end
+local function pivo(b)
+    if not b then return nil end
+    local ok, cf = pcall(function() return b:GetPivot() end)
+    return ok and cf.Position or nil
+end
+local function plano(v) return Vector2.new(v.X, v.Z) end
+
+-- distancia de um ponto ao segmento a->b (tudo no plano da mesa)
+local function distSegmento(p, a, b)
+    local ab = b - a
+    local t = ab.Magnitude > 0 and math.clamp((p - a):Dot(ab) / ab:Dot(ab), 0, 1) or 0
+    return (p - (a + ab * t)).Magnitude
+end
+
+local function melhorTacada()
+    local mesa = mesaAtual()
+    if not mesa then return nil, "mesa nao encontrada" end
+    local fis = require(RS.Modules.SnookerPhysics)
+    local bw = mesa.Balls:FindFirstChild("White")
+    local pw = pivo(bw)
+    if not pw then return nil, "branca fora da mesa" end
+    local pAlvo = bw:FindFirstChildWhichIsA("BasePart")
+    local frame = fis.BuildFrame(mesa, pAlvo and math.max(pAlvo.Size.X, pAlvo.Size.Y, pAlvo.Size.Z) or 0.36)
+    local st = fis.NewState(frame)
+    local r = st.Radius or 0.18
+
+    -- cacapas em coordenada do mundo
+    local cacapas = {}
+    for _, pl in ipairs(st.Pockets or {}) do
+        cacapas[#cacapas + 1] = plano(fis.LocalToWorld(frame, pl))
+    end
+
+    -- bolas vivas
+    local alvos, todas = {}, {}
+    for _, b in ipairs(mesa.Balls:GetChildren()) do
+        local pos = pivo(b)
+        if pos and not b:GetAttribute("Pocketed") then
+            local p2 = plano(pos)
+            todas[#todas + 1] = { nome = b.Name, p = p2 }
+            if b.Name ~= "White" then alvos[#alvos + 1] = { nome = b.Name, p = p2 } end
+        end
+    end
+    if #alvos == 0 then return nil, "nao ha bola pra jogar" end
+
+    local W = plano(pw)
+    local melhor, nota = nil, -1e9
+    for _, alvo in ipairs(alvos) do
+        for _, C in ipairs(cacapas) do
+            local paraCacapa = C - alvo.p
+            if paraCacapa.Magnitude > 0.001 then
+                local dirTC = paraCacapa.Unit
+                local fantasma = alvo.p - dirTC * (2 * r)
+                local paraFantasma = fantasma - W
+                if paraFantasma.Magnitude > 0.001 then
+                    local dirWG = paraFantasma.Unit
+                    local cos = dirWG:Dot(dirTC)
+                    local ang = math.deg(math.acos(math.clamp(cos, -1, 1)))
+                    if ang <= S.corte then
+                        -- o caminho esta livre?
+                        local livre = true
+                        for _, o in ipairs(todas) do
+                            if o.nome ~= alvo.nome and o.nome ~= "White" then
+                                if distSegmento(o.p, W, fantasma) < 2 * r then livre = false break end
+                                if distSegmento(o.p, alvo.p, C) < 2 * r then livre = false break end
+                            end
+                        end
+                        if livre then
+                            -- prefiro corte pequeno e distancia curta
+                            local d = paraFantasma.Magnitude + paraCacapa.Magnitude
+                            local n = -ang * 1.4 - d * 2.0
+                            if n > nota then
+                                nota = n
+                                melhor = { alvo = alvo.nome, ang = ang, dist = d,
+                                           dir = dirWG, cacapa = C }
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    if not melhor then return nil, "nenhuma bola limpa pra encacapar" end
+    -- forca: o suficiente pra vencer a distancia, com piso
+    local pot = math.clamp(0.35 + melhor.dist / 26, 0.4, 1) * S.forca
+    melhor.power = math.clamp(pot, 0.1, 1)
+    melhor.mesa = mesa
+    melhor.heading = Vector3.new(melhor.dir.X, 0, melhor.dir.Y).Unit
+    return melhor
+end
+
+local function tacar()
+    local mesa = mesaAtual()
+    if not mesa then avisar("Snooker", "Table not found", 3) return false end
+    if mesa:GetAttribute("ShooterId") ~= LP.UserId then
+        avisar("Snooker", "Not your turn", 3) return false
+    end
+    if mesa:GetAttribute("SnookerBusy") then
+        avisar("Snooker", "Table is busy", 3) return false
+    end
+    local t, motivo = melhorTacada()
+    if not t then avisar("Snooker", motivo or "no shot", 3) return false end
+    local ok = pcall(function()
+        C.Snooker.Strike.Fire({ Table = t.mesa, Heading = t.heading, Power = t.power })
+    end)
+    if ok then
+        S.tacadas = S.tacadas + 1
+        avisar("Snooker", ("%s  ·  cut %.0f°  ·  power %.2f"):format(t.alvo, t.ang, t.power), 4)
+    end
+    return ok
+end
+
+-- o automatico: espera chegar a minha vez
+task.spawn(function()
+    while souAtual() do
+        task.wait(1)
+        if S.ligado then
+            local mesa = mesaAtual()
+            if mesa and mesa:GetAttribute("ShooterId") == LP.UserId
+                and not mesa:GetAttribute("SnookerBusy") then
+                pcall(tacar)
+                task.wait(4)   -- deixa a jogada rodar antes de olhar de novo
+            end
+        end
+    end
+end)
+
+do
+    local s2 = abaMini:Section("Snooker", nil, 2)
+    s2:Button({ Name = "Shoot now", Callback = function() task.spawn(tacar) end })
+    s2:Toggle({ Name = "Auto play", Default = false, Bell = false,
+        Callback = function(v) S.ligado = v end })
+    -- a FORCA e o unico numero que eu ainda nao calibrei: sei que vai de
+    -- 0 a 1, mas nao medi quanto uma bola anda com cada valor. Deixei o
+    -- multiplicador a mostra pra voce achar o ponto jogando.
+    s2:Slider({ Name = "Power", Min = 0.5, Max = 1.6, Default = 1.0,
+        Decimals = 2, Suffix = "x",
+        Callback = function(v) S.forca = v end })
+    local info = s2:Info("...", 34)
+    task.spawn(function()
+        while souAtual() do
+            task.wait(1)
+            local mesa = mesaAtual()
+            local minhaVez = mesa and mesa:GetAttribute("ShooterId") == LP.UserId
+            info.set(("shots %d   ·   %s"):format(S.tacadas,
+                mesa and (minhaVez and "your turn" or "waiting") or "no table"))
+        end
+    end)
+end
+
+getgenv().Sinuca5A46 = S
 
 getgenv().Queimada5A46 = { cfg = Q, restaurar = restaurar }
 
