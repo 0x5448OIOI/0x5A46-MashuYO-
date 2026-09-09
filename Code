@@ -1756,6 +1756,10 @@ local C = {
     venderMinerio = true,
     limitePeixe   = 15,   -- MAX_FISHES do jogo
     limiteMinerio = 15,
+    ---------------------------------------------------------- reparar
+    repararVara     = true,
+    repararPicareta = true,
+    limiteReparo    = 0.25,   -- so entra quando cair pra 25% ou menos
 }
 local pedido = false
 local function salvar()
@@ -1765,7 +1769,8 @@ local function salvar()
         pedido = false
         pcall(function()
             writefile(ARQ, Http:JSONEncode({ autoOn = C.autoOn, mineOn = C.mineOn,
-                venderPeixe = C.venderPeixe, venderMinerio = C.venderMinerio }))
+                venderPeixe = C.venderPeixe, venderMinerio = C.venderMinerio,
+                repararVara = C.repararVara, repararPicareta = C.repararPicareta }))
         end)
     end)
 end
@@ -1780,6 +1785,8 @@ pcall(function()
             if type(d.mineOn) == "boolean" then C.mineOn = d.mineOn end
             if type(d.venderPeixe) == "boolean" then C.venderPeixe = d.venderPeixe end
             if type(d.venderMinerio) == "boolean" then C.venderMinerio = d.venderMinerio end
+            if type(d.repararVara) == "boolean" then C.repararVara = d.repararVara end
+            if type(d.repararPicareta) == "boolean" then C.repararPicareta = d.repararPicareta end
         end
     end
 end)
@@ -2793,6 +2800,137 @@ local function venderRemoto(tipo, qtd)
     return caiu
 end
 
+--==================================================================
+--                          REPARAR
+--==================================================================
+-- MEDIDO no jogo, tudo isto:
+--   RequestPlayerData().fishingInfo.rods  = LISTA  [i] = {Name, Durability, Casts}
+--   RequestPlayerData().mining.pickaxes   = DICIONARIO  [Nome] = {durability}
+--   (repare que sao formatos diferentes, e o "d" e maiusculo num e
+--    minusculo no outro. Nao da pra tratar os dois igual.)
+-- O maximo vem da config:
+--   Configuration.Fish.fishingRods[Nome].Durability   (Classic Rod = 75)
+--   Configuration.pickaxes -> All[Nome].MaxDurability (Wooden = 75)
+-- E existe reparo INDIVIDUAL, nao so o "reparar tudo":
+--   Fire("RepairFishingRod", Index)   <- posicao na lista
+--   Fire("RepairPickaxe",    Name)    <- pelo nome
+-- Por isso da pra fazer o que voce pediu: consertar so a estragada, em
+-- vez de pagar pra consertar o inventario inteiro.
+--
+-- ATENCAO nas unidades: a sua Classic Rod aparece com Durability = 100,
+-- mas a config diz que o maximo dela e 75. Ou o jogo guarda a vara em
+-- porcentagem, ou a config esta desatualizada — nao sei qual. Entao eu
+-- nao confio so na config: uso o MAIOR entre a config e o maior valor
+-- que eu ja vi naquela ferramenta. Assim, cheia nunca conta como
+-- estragada, que e o erro que gastaria o seu dinheiro a toa.
+local maxVisto = {}
+
+local function maxDaVara(nome)
+    local m = 0
+    pcall(function()
+        local F = require(RS.Configuration.Fish)
+        local def = F.fishingRods and F.fishingRods[nome]
+        if def and tonumber(def.Durability) then m = tonumber(def.Durability) end
+    end)
+    return m
+end
+local function maxDaPicareta(nome)
+    local m = 0
+    pcall(function()
+        local pk = require(RS.Configuration.pickaxes)
+        local def = pk.GetPickaxe and pk.GetPickaxe(nome)
+        if not def then
+            local up = debug.getupvalues(pk.GetPickaxe)[1]
+            def = up and up.All and up.All[nome]
+        end
+        if def and tonumber(def.MaxDurability) then m = tonumber(def.MaxDurability) end
+    end)
+    return m
+end
+
+-- devolve lista de { chave, nome, dur, max } de tudo que voce tem
+local function listarFerramentas(tipo)
+    local d = dadosDoJogador()
+    local r = {}
+    if not d then return r end
+    if tipo == "pick" then
+        local t = d.mining and d.mining.pickaxes
+        if type(t) ~= "table" then return r end
+        for nome, item in pairs(t) do
+            local dur = tonumber(type(item) == "table" and (item.durability or item.Durability) or item)
+            if dur then
+                local mx = math.max(maxDaPicareta(nome), maxVisto["p:" .. nome] or 0, dur)
+                maxVisto["p:" .. nome] = mx
+                r[#r + 1] = { chave = nome, nome = nome, dur = dur, max = mx }
+            end
+        end
+    else
+        local t = d.fishingInfo and d.fishingInfo.rods
+        if type(t) ~= "table" then return r end
+        for i, item in ipairs(t) do
+            local nome = type(item) == "table" and tostring(item.Name or "?") or "?"
+            local dur = tonumber(type(item) == "table" and (item.Durability or item.durability) or item)
+            if dur then
+                local mx = math.max(maxDaVara(nome), maxVisto["v:" .. nome] or 0, dur)
+                maxVisto["v:" .. nome] = mx
+                r[#r + 1] = { chave = i, nome = nome, dur = dur, max = mx }
+            end
+        end
+    end
+    return r
+end
+
+-- limiar: manual conserta qualquer coisa abaixo do cheio; o automatico
+-- so entra quando esta baixo mesmo, senao ele ia correr pro NPC depois
+-- de cada lancada (perde 1 de durabilidade -> viagem).
+local function precisaReparo(tipo, fracao)
+    local lista, quais = listarFerramentas(tipo), {}
+    for _, f in ipairs(lista) do
+        local ruim
+        if fracao then
+            ruim = f.max > 0 and (f.dur / f.max) <= fracao
+        else
+            ruim = f.dur < f.max
+        end
+        if ruim then quais[#quais + 1] = f end
+    end
+    return quais
+end
+
+local function reparar(tipo, fracao)
+    if vendendo then return false end
+    local quais = precisaReparo(tipo, fracao)
+    if #quais == 0 then return false, "nada estragado" end
+    if not eventos() then return false, "sem canal de rede" end
+
+    vendendo = true
+    local _, raiz = raizDoNpc(tipo == "pick" and "Miner" or "Fisherman")
+    if not raiz then vendendo = false return false, "NPC nao carregado" end
+    local volta = chegarPerto(raiz, 6)
+    if not volta then vendendo = false return false, "nao cheguei no NPC" end
+
+    for _, f in ipairs(quais) do
+        if tipo == "pick" then
+            disparar("RepairPickaxe", f.chave)
+        else
+            disparar("RepairFishingRod", f.chave)
+        end
+        task.wait(0.4)
+    end
+    task.wait(0.6)
+    dadosCache = nil
+    local sobrou = precisaReparo(tipo, fracao)
+    local consertou = #quais - #sobrou
+    voltarPara(volta)
+    vendendo = false
+    if consertou > 0 then
+        avisar("Shop", ("Repaired %d %s"):format(consertou,
+            tipo == "pick" and "pickaxe(s)" or "rod(s)"), 4)
+        return true
+    end
+    return false, "o servidor nao aceitou o reparo"
+end
+
 -- qtd = nil ou >= o que tem  ->  usa o Sell All
 local function vender(nome, aba, qtd)
     if vendendo then return false end
@@ -2860,6 +2998,14 @@ task.spawn(function()
                     statMina.coletas = 0
                     dadosCache = nil   -- forca reler depois de vender
                 end
+            -- o reparo vem DEPOIS da venda de proposito: se a mochila
+            -- esta cheia, esvaziar primeiro e o que destrava o farm.
+            elseif C.autoOn and C.repararVara
+                and #precisaReparo("rod", C.limiteReparo) > 0 then
+                reparar("rod", C.limiteReparo)
+            elseif C.mineOn and C.repararPicareta
+                and #precisaReparo("pick", C.limiteReparo) > 0 then
+                reparar("pick", C.limiteReparo)
             end
         end
     end
@@ -2956,15 +3102,47 @@ do
         if tick() - ultShop < 2 then return end
         ultShop = tick()
         if not (win.Active == abaShop and win.Main.Visible and not win.Minimized) then return end
-        painelShop.set(("fish %d / %d\nores %d / %d"):format(
-            contarPeixes(), C.limitePeixe, contarMinerios(), C.limiteMinerio))
+        local function resumo(tipo)
+            local l = listarFerramentas(tipo)
+            if #l == 0 then return "-" end
+            local pior = l[1]
+            for _, f in ipairs(l) do
+                if f.max > 0 and pior.max > 0 and (f.dur / f.max) < (pior.dur / pior.max) then
+                    pior = f
+                end
+            end
+            return ("%s %d/%d"):format(pior.nome, pior.dur, pior.max)
+        end
+        painelShop.set(("fish %d / %d   ores %d / %d\n%s\n%s"):format(
+            contarPeixes(), C.limitePeixe, contarMinerios(), C.limiteMinerio,
+            resumo("rod"), resumo("pick")))
     end)
 
-    local a2 = abaShop:Section("Auto sell", nil, 2)
+    local sr = abaShop:Section("Repair", nil, 1)
+    -- no botao eu conserto qualquer coisa abaixo do cheio; foi voce que
+    -- mandou, e aqui a decisao e sua
+    sr:Button({ Name = "Repair rod", Callback = function()
+        task.spawn(function()
+            local ok, motivo = reparar("rod", nil)
+            if not ok then avisar("Shop", motivo or "nothing to repair", 3) end
+        end)
+    end })
+    sr:Button({ Name = "Repair pickaxe", Callback = function()
+        task.spawn(function()
+            local ok, motivo = reparar("pick", nil)
+            if not ok then avisar("Shop", motivo or "nothing to repair", 3) end
+        end)
+    end })
+
+    local a2 = abaShop:Section("Auto", nil, 2)
     a2:Toggle({ Name = "Sell fish at 15", Default = C.venderPeixe, Bell = false,
         Callback = function(v) C.venderPeixe = v salvar() end })
     a2:Toggle({ Name = "Sell ores at 15", Default = C.venderMinerio, Bell = false,
         Callback = function(v) C.venderMinerio = v salvar() end })
+    a2:Toggle({ Name = "Repair rod at 25%", Default = C.repararVara, Bell = false,
+        Callback = function(v) C.repararVara = v salvar() end })
+    a2:Toggle({ Name = "Repair pickaxe at 25%", Default = C.repararPicareta, Bell = false,
+        Callback = function(v) C.repararPicareta = v salvar() end })
 end
 
 --==================================================================
@@ -3886,3 +4064,495 @@ do
 end
 
 getgenv().Jogador5A46 = J
+--[[=================================================================
+    ESP  ·  aba do painel 0x5A46
+    -------------------------------------------------------------------
+    Tudo desenhado com GUI do proprio Roblox, NAO com a biblioteca
+    Drawing. Motivo: Drawing nao existe em todo executor, e quando
+    existe ela desenha por cima de tudo e some em screenshot. Com
+    Frame/UIStroke funciona em qualquer executor e segue o tema do
+    painel.
+
+    O desenho tem tres partes:
+      · Highlight  - o contorno preenchido, e instancia do jogo, colada
+                     no personagem. Nao precisa de calculo por frame.
+      · Caixa 2D / esqueleto / tracer / rotulo - esses SIM precisam
+                     projetar posicao do mundo pra tela todo frame, com
+                     Camera:WorldToViewportPoint.
+      · Avatar     - a foto vem de Players:GetUserThumbnailAsync, que e
+                     chamada de rede. Guardo em cache por UserId, senao
+                     travaria toda hora.
+
+    Cuidado com peso: quando fui medir tinha 35 jogadores no servidor.
+    35 x (caixa + 15 ossos + tracer) e muito Frame pra mexer por frame.
+    Por isso tem limite de distancia e teto de quantos aparecem, e os
+    Frames sao reaproveitados (pool), nunca criados/destruidos no loop.
+===================================================================]]
+
+local P = getgenv().Painel5A46
+if not P then return end
+local souAtual = P.souAtual
+local Theme, RAIZ = P.Theme, P.RAIZ
+
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local GuiService = game:GetService("GuiService")
+local LP = Players.LocalPlayer
+
+local Camera = workspace.CurrentCamera
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    if workspace.CurrentCamera then Camera = workspace.CurrentCamera end
+end)
+
+local E = {
+    ligado    = false,
+    contorno  = true,
+    caixa     = true,
+    esqueleto = false,
+    tracer    = false,
+    origem    = "Top",   -- de onde a linha sai
+    nome      = true,
+    distancia = true,
+    vida      = true,
+    ferramenta= true,
+    avatar    = false,
+    equipe    = false,   -- cor por time
+    alcance   = 500,
+    teto      = 20,      -- quantos jogadores desenhar de uma vez
+    espessura = 1,
+}
+
+local COR_AMIGO  = Color3.fromRGB(120, 255, 140)
+local COR_INIMIGO= Color3.fromRGB(255, 105, 105)
+local COR_PADRAO = Color3.fromRGB(255, 255, 255)
+
+--==================================================================
+--                          A TELA
+--==================================================================
+local antiga = RAIZ:FindFirstChild("ESP_0x5A46")
+if antiga then antiga:Destroy() end
+local tela = Instance.new("ScreenGui")
+tela.Name = "ESP_0x5A46"
+tela.ResetOnSpawn = false
+-- O ScreenGui IGNORA o inset, e por dois motivos medidos:
+--   1) so assim o canvas e a tela INTEIRA (1920x1009). Respeitando o
+--      inset ele fica 1920x951 e comeca 58px abaixo do topo real — era
+--      por isso que o tracer nascia embaixo da barra, e nao no topo.
+--   2) neste modo o WorldToViewportPoint CRU ja cai no lugar certo.
+--      Provei contra o cursor: pedi o ponto do mundo sob ele, projetei
+--      cru e o frame caiu em 1177,947 com o cursor em 1178,947. Erro 0.
+tela.IgnoreGuiInset = true
+tela.DisplayOrder = 997
+tela.Enabled = false
+tela.Parent = RAIZ
+
+-- A projecao tem que casar com o modo de inset do ScreenGui acima.
+-- Como ele IGNORA o inset, o canvas comeca no topo real da tela e o
+-- WorldToViewportPoint cru ja esta nesse mesmo espaco. Nada de somar
+-- ou tirar 58 na mao: quando eu fazia isso o desconto entrava duas
+-- vezes e era o que jogava o desenho pra baixo do corpo.
+local function projetar(pos)
+    local v, naTela = Camera:WorldToViewportPoint(pos)
+    return Vector2.new(v.X, v.Y), v.Z, naTela
+end
+
+local function novoFrame(pai, z)
+    local f = Instance.new("Frame")
+    f.BorderSizePixel = 0
+    f.BackgroundTransparency = 1
+    f.AnchorPoint = Vector2.new(0.5, 0.5)
+    f.ZIndex = z or 1
+    f.Visible = false
+    f.Parent = pai or tela
+    return f
+end
+
+--==================================================================
+--             OSSOS  (quais partes ligam em quais)
+--==================================================================
+local OSSOS_R15 = {
+    { "Head", "UpperTorso" }, { "UpperTorso", "LowerTorso" },
+    { "UpperTorso", "LeftUpperArm" }, { "LeftUpperArm", "LeftLowerArm" },
+    { "LeftLowerArm", "LeftHand" },
+    { "UpperTorso", "RightUpperArm" }, { "RightUpperArm", "RightLowerArm" },
+    { "RightLowerArm", "RightHand" },
+    { "LowerTorso", "LeftUpperLeg" }, { "LeftUpperLeg", "LeftLowerLeg" },
+    { "LeftLowerLeg", "LeftFoot" },
+    { "LowerTorso", "RightUpperLeg" }, { "RightUpperLeg", "RightLowerLeg" },
+    { "RightLowerLeg", "RightFoot" },
+}
+local OSSOS_R6 = {
+    { "Head", "Torso" },
+    { "Torso", "Left Arm" }, { "Torso", "Right Arm" },
+    { "Torso", "Left Leg" }, { "Torso", "Right Leg" },
+}
+local MAX_OSSOS = #OSSOS_R15
+
+--==================================================================
+--                     CACHE DA FOTO DO AVATAR
+--==================================================================
+local fotoCache = {}
+local function fotoDe(userId)
+    if fotoCache[userId] ~= nil then return fotoCache[userId] end
+    fotoCache[userId] = false   -- marca "pedindo", pra nao pedir de novo
+    task.spawn(function()
+        local ok, url = pcall(function()
+            return Players:GetUserThumbnailAsync(userId,
+                Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size48x48)
+        end)
+        fotoCache[userId] = (ok and url) or false
+    end)
+    return false
+end
+
+--==================================================================
+--                     UM DESENHO POR JOGADOR
+--==================================================================
+local desenhos = {}
+
+local function criarDesenho()
+    local d = {}
+    d.caixa = novoFrame(nil, 2)
+    d.caixa.BackgroundTransparency = 1
+    d.caixaStroke = Instance.new("UIStroke")
+    d.caixaStroke.Thickness = 1
+    d.caixaStroke.Color = COR_PADRAO
+    d.caixaStroke.Parent = d.caixa
+
+    -- barra de vida colada na esquerda da caixa
+    d.vidaFundo = novoFrame(nil, 2)
+    d.vidaFundo.BackgroundTransparency = 0.35
+    d.vidaFundo.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    d.vida = Instance.new("Frame")
+    d.vida.BorderSizePixel = 0
+    d.vida.AnchorPoint = Vector2.new(0.5, 1)
+    d.vida.Position = UDim2.fromScale(0.5, 1)
+    d.vida.ZIndex = 3
+    d.vida.Parent = d.vidaFundo
+
+    d.tracer = novoFrame(nil, 1)
+    d.tracer.BackgroundTransparency = 0
+
+    d.rotulo = Instance.new("TextLabel")
+    d.rotulo.BackgroundTransparency = 1
+    d.rotulo.AnchorPoint = Vector2.new(0.5, 1)
+    d.rotulo.Size = UDim2.fromOffset(240, 16)
+    d.rotulo.Font = Enum.Font.GothamMedium
+    d.rotulo.TextSize = 12
+    d.rotulo.TextColor3 = COR_PADRAO
+    d.rotulo.TextStrokeTransparency = 0.4
+    d.rotulo.ZIndex = 4
+    d.rotulo.Visible = false
+    d.rotulo.Parent = tela
+
+    d.abaixo = d.rotulo:Clone()
+    d.abaixo.AnchorPoint = Vector2.new(0.5, 0)
+    d.abaixo.TextSize = 11
+    d.abaixo.Parent = tela
+
+    d.foto = Instance.new("ImageLabel")
+    d.foto.BackgroundTransparency = 1
+    d.foto.AnchorPoint = Vector2.new(0.5, 1)
+    d.foto.Size = UDim2.fromOffset(34, 34)
+    d.foto.ZIndex = 4
+    d.foto.Visible = false
+    d.foto.Parent = tela
+    local canto = Instance.new("UICorner")
+    canto.CornerRadius = UDim.new(1, 0)
+    canto.Parent = d.foto
+
+    d.ossos = {}
+    for i = 1, MAX_OSSOS do d.ossos[i] = novoFrame(nil, 2) end
+    return d
+end
+
+local function esconder(d)
+    d.caixa.Visible = false
+    d.vidaFundo.Visible = false
+    d.tracer.Visible = false
+    d.rotulo.Visible = false
+    d.abaixo.Visible = false
+    d.foto.Visible = false
+    for _, o in ipairs(d.ossos) do o.Visible = false end
+end
+
+local function soltarDesenho(plr)
+    local d = desenhos[plr]
+    if not d then return end
+    d.caixa:Destroy() d.vidaFundo:Destroy() d.tracer:Destroy()
+    d.rotulo:Destroy() d.abaixo:Destroy() d.foto:Destroy()
+    for _, o in ipairs(d.ossos) do o:Destroy() end
+    desenhos[plr] = nil
+end
+
+--==================================================================
+--                        O CONTORNO
+--==================================================================
+local function porContorno(plr, cor)
+    local c = plr.Character
+    if not c then return end
+    local h = c:FindFirstChild("0x5A46_esp")
+    if not h then
+        h = Instance.new("Highlight")
+        h.Name = "0x5A46_esp"
+        h.FillTransparency = 0.72
+        h.OutlineTransparency = 0
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Adornee = c
+        h.Parent = c
+    end
+    h.FillColor = cor
+    h.OutlineColor = cor
+end
+local function tirarContorno(plr)
+    local c = plr.Character
+    local h = c and c:FindFirstChild("0x5A46_esp")
+    if h then h:Destroy() end
+end
+local function tirarTodosContornos()
+    for _, p in ipairs(Players:GetPlayers()) do pcall(tirarContorno, p) end
+end
+
+--==================================================================
+--                     DESENHAR UMA LINHA 2D
+--==================================================================
+-- Frame nao tem "linha": eu faco a linha girando um Frame fino. O
+-- meio dele fica no meio dos dois pontos, o comprimento e a distancia
+-- e a rotacao e o angulo entre eles.
+local function linha(f, a, b, cor, grossura)
+    local dx, dy = b.X - a.X, b.Y - a.Y
+    local comp = math.sqrt(dx * dx + dy * dy)
+    if comp < 1 then f.Visible = false return end
+    f.Position = UDim2.fromOffset((a.X + b.X) / 2, (a.Y + b.Y) / 2)
+    f.Size = UDim2.fromOffset(comp, grossura)
+    f.Rotation = math.deg(math.atan2(dy, dx))
+    f.BackgroundColor3 = cor
+    f.BackgroundTransparency = 0
+    f.Visible = true
+end
+
+--==================================================================
+--                          O LOOP
+--==================================================================
+local function corDe(plr)
+    if not E.equipe then return COR_PADRAO end
+    if plr.Team and LP.Team and plr.Team == LP.Team then return COR_AMIGO end
+    return COR_INIMIGO
+end
+
+local function ferramentaDe(c)
+    local t = c and c:FindFirstChildWhichIsA("Tool")
+    return t and t.Name or nil
+end
+
+RunService.RenderStepped:Connect(function()
+    if not souAtual() then return end
+    tela.Enabled = E.ligado
+    if not E.ligado then return end
+
+    local meuRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    -- uso o tamanho do PROPRIO canvas, nao o ViewportSize. Sao coisas
+    -- diferentes quando o ScreenGui respeita o inset, e ja me mordeu.
+    local tam = tela.AbsoluteSize
+    if tam.Y < 2 then tam = Camera.ViewportSize end
+    local origemTracer
+    if E.origem == "Bottom" then
+        origemTracer = Vector2.new(tam.X / 2, tam.Y)
+    elseif E.origem == "Center" then
+        origemTracer = Vector2.new(tam.X / 2, tam.Y / 2)
+    elseif E.origem == "Mouse" then
+        local m = LP:GetMouse()
+        origemTracer = Vector2.new(m.X, m.Y + GuiService:GetGuiInset().Y)
+    else
+        origemTracer = Vector2.new(tam.X / 2, 0)   -- topo real da tela
+    end
+
+    -- ordena por distancia e corta no teto, pra nao desenhar 35 de uma vez
+    local lista = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LP then
+            local c = plr.Character
+            local root = c and c:FindFirstChild("HumanoidRootPart")
+            local hum = c and c:FindFirstChildWhichIsA("Humanoid")
+            if root and hum and hum.Health > 0 then
+                local dist = meuRoot and (root.Position - meuRoot.Position).Magnitude or 0
+                if dist <= E.alcance then
+                    lista[#lista + 1] = { plr = plr, root = root, hum = hum, c = c, dist = dist }
+                end
+            end
+        end
+    end
+    table.sort(lista, function(a, b) return a.dist < b.dist end)
+
+    local mostrando = {}
+    for i = 1, math.min(#lista, E.teto) do
+        local it = lista[i]
+        local plr = it.plr
+        mostrando[plr] = true
+        local d = desenhos[plr]
+        if not d then d = criarDesenho() desenhos[plr] = d end
+
+        local cor = corDe(plr)
+        if E.contorno then porContorno(plr, cor) else tirarContorno(plr) end
+
+        -- caixa: projeto o topo da cabeca e a base dos pes
+        local cabeca = it.c:FindFirstChild("Head")
+        local altoM = (cabeca and cabeca.Position or it.root.Position) + Vector3.new(0, 1.5, 0)
+        local baixoM = it.root.Position - Vector3.new(0, 3.2, 0)
+        local alto, zAlto, naTela1 = projetar(altoM)
+        local baixo, _, naTela2 = projetar(baixoM)
+
+        if (naTela1 or naTela2) and zAlto > 0 then
+            local h2 = math.abs(baixo.Y - alto.Y)
+            local w2 = h2 * 0.62
+            local cx = (alto.X + baixo.X) / 2
+            local cy = (alto.Y + baixo.Y) / 2
+
+            if E.caixa then
+                d.caixa.Position = UDim2.fromOffset(cx, cy)
+                d.caixa.Size = UDim2.fromOffset(w2, h2)
+                d.caixaStroke.Color = cor
+                d.caixaStroke.Thickness = E.espessura
+                d.caixa.Visible = true
+            else d.caixa.Visible = false end
+
+            if E.vida then
+                local frac = math.clamp(it.hum.Health / math.max(it.hum.MaxHealth, 1), 0, 1)
+                d.vidaFundo.Position = UDim2.fromOffset(cx - w2 / 2 - 5, cy)
+                d.vidaFundo.Size = UDim2.fromOffset(3, h2)
+                d.vida.Size = UDim2.fromScale(1, frac)
+                d.vida.BackgroundColor3 = Color3.fromRGB(255, 255, 255):Lerp(cor, 0.5)
+                d.vidaFundo.Visible = true
+            else d.vidaFundo.Visible = false end
+
+            if E.tracer then
+                linha(d.tracer, origemTracer, Vector2.new(cx, cy + h2 / 2), cor, E.espessura)
+            else d.tracer.Visible = false end
+
+            -- rotulo de cima: nome (+ vida em numero)
+            local topo = {}
+            if E.nome then topo[#topo + 1] = plr.DisplayName ~= plr.Name
+                and (plr.DisplayName .. " (" .. plr.Name .. ")") or plr.Name end
+            if E.vida then topo[#topo + 1] = ("%d hp"):format(math.floor(it.hum.Health)) end
+            if #topo > 0 then
+                d.rotulo.Text = table.concat(topo, "  ·  ")
+                d.rotulo.TextColor3 = cor
+                d.rotulo.Position = UDim2.fromOffset(cx, cy - h2 / 2 - 4)
+                d.rotulo.Visible = true
+            else d.rotulo.Visible = false end
+
+            -- rotulo de baixo: distancia e ferramenta na mao
+            local baixoT = {}
+            if E.distancia then baixoT[#baixoT + 1] = ("%dm"):format(math.floor(it.dist)) end
+            if E.ferramenta then
+                local f = ferramentaDe(it.c)
+                if f then baixoT[#baixoT + 1] = f end
+            end
+            if #baixoT > 0 then
+                d.abaixo.Text = table.concat(baixoT, "  ·  ")
+                d.abaixo.TextColor3 = cor
+                d.abaixo.Position = UDim2.fromOffset(cx, cy + h2 / 2 + 3)
+                d.abaixo.Visible = true
+            else d.abaixo.Visible = false end
+
+            if E.avatar then
+                local url = fotoDe(plr.UserId)
+                if url then
+                    d.foto.Image = url
+                    local y = cy - h2 / 2 - 4 - (d.rotulo.Visible and 15 or 0)
+                    d.foto.Position = UDim2.fromOffset(cx, y)
+                    d.foto.Visible = true
+                else d.foto.Visible = false end
+            else d.foto.Visible = false end
+
+            if E.esqueleto then
+                local ossos = it.hum.RigType == Enum.HumanoidRigType.R15
+                    and OSSOS_R15 or OSSOS_R6
+                for k = 1, MAX_OSSOS do
+                    local par = ossos[k]
+                    local f = d.ossos[k]
+                    if par then
+                        local p1 = it.c:FindFirstChild(par[1])
+                        local p2 = it.c:FindFirstChild(par[2])
+                        if p1 and p2 then
+                            local a, za, va = projetar(p1.Position)
+                            local b, zb, vb = projetar(p2.Position)
+                            if za > 0 and zb > 0 and (va or vb) then
+                                linha(f, a, b, cor, E.espessura)
+                            else f.Visible = false end
+                        else f.Visible = false end
+                    else f.Visible = false end
+                end
+            else
+                for _, o in ipairs(d.ossos) do o.Visible = false end
+            end
+        else
+            esconder(d)
+        end
+    end
+
+    -- quem saiu da lista some (e perde o contorno)
+    for plr, d in pairs(desenhos) do
+        if not mostrando[plr] then
+            esconder(d)
+            pcall(tirarContorno, plr)
+        end
+    end
+end)
+
+Players.PlayerRemoving:Connect(function(plr) soltarDesenho(plr) end)
+
+--==================================================================
+--                            A ABA
+--==================================================================
+do
+    local aba = P.Tab("ESP", "○")
+
+    local s1 = aba:Section("ESP", nil, 1)
+    s1:Toggle({ Name = "Enable", Default = false, Bell = false,
+        Keybind = { Key = Enum.KeyCode.J },
+        Callback = function(v)
+            E.ligado = v
+            if not v then
+                tirarTodosContornos()
+                for _, d in pairs(desenhos) do esconder(d) end
+            end
+        end })
+    s1:Toggle({ Name = "Outline", Default = true, Bell = false,
+        Callback = function(v) E.contorno = v if not v then tirarTodosContornos() end end })
+    s1:Toggle({ Name = "2D box", Default = true, Bell = false,
+        Callback = function(v) E.caixa = v end })
+    s1:Toggle({ Name = "Skeleton", Default = false, Bell = false,
+        Callback = function(v) E.esqueleto = v end })
+    s1:Toggle({ Name = "Tracer", Default = false, Bell = false,
+        Callback = function(v) E.tracer = v end })
+    s1:Dropdown({ Name = "Tracer from", Items = { "Top", "Center", "Bottom", "Mouse" },
+        Default = "Top", Callback = function(v) E.origem = v end })
+    s1:Toggle({ Name = "Health bar", Default = true, Bell = false,
+        Callback = function(v) E.vida = v end })
+
+    local s2 = aba:Section("Info", nil, 2)
+    s2:Toggle({ Name = "Name", Default = true, Bell = false,
+        Callback = function(v) E.nome = v end })
+    s2:Toggle({ Name = "Distance", Default = true, Bell = false,
+        Callback = function(v) E.distancia = v end })
+    s2:Toggle({ Name = "Held tool", Default = true, Bell = false,
+        Callback = function(v) E.ferramenta = v end })
+    s2:Toggle({ Name = "Avatar", Default = false, Bell = false,
+        Callback = function(v) E.avatar = v end })
+    s2:Toggle({ Name = "Team colors", Default = false, Bell = false,
+        Callback = function(v) E.equipe = v end })
+
+    local s3 = aba:Section("Limits", nil, 2)
+    s3:Slider({ Name = "Range", Min = 50, Max = 2000, Default = 500, Suffix = "m",
+        Callback = function(v) E.alcance = v end })
+    -- MEDIDO: o servidor tinha 35 pessoas. Desenhar caixa + 14 ossos +
+    -- tracer pra todo mundo e muito Frame por frame. Este teto pega os
+    -- mais PERTO primeiro, que sao os que importam.
+    s3:Slider({ Name = "Max players", Min = 1, Max = 40, Default = 20,
+        Callback = function(v) E.teto = v end })
+    s3:Slider({ Name = "Thickness", Min = 1, Max = 5, Default = 1,
+        Callback = function(v) E.espessura = v end })
+end
+
+getgenv().Esp5A46 = E
