@@ -1666,6 +1666,8 @@ ENV.Painel5A46 = {
 }
 win:Notify({ Title = "0x5A46", Text = "panel loaded · v" .. MINHA_VERSAO, Duration = 5 })
 print("[0x5A46] painel pronto · v" .. MINHA_VERSAO)
+
+;(function()
 --[[=================================================================
     AUTO PESCA  ·  aba do painel 0x5A46
     -------------------------------------------------------------------
@@ -3493,6 +3495,10 @@ win:Select(aba)
 getgenv().Pesca5A46 = { cfg = C, stat = stat, mina = statMina, estado = estado }
 print("[0x5A46] auto fish ready · F toggles · State = " .. estado())
 avisar("Farm", "F = auto fish · G = auto mine", 5)
+
+end)()
+
+;(function()
 --[[=================================================================
     PLAYER  ·  aba do painel 0x5A46
     -------------------------------------------------------------------
@@ -4064,6 +4070,10 @@ do
 end
 
 getgenv().Jogador5A46 = J
+
+end)()
+
+;(function()
 --[[=================================================================
     ESP  ·  aba do painel 0x5A46
     -------------------------------------------------------------------
@@ -4556,3 +4566,185 @@ do
 end
 
 getgenv().Esp5A46 = E
+
+end)()
+
+;(function()
+--[[=================================================================
+    MINIGAMES  ·  aba do painel 0x5A46
+    -------------------------------------------------------------------
+    QUEIMADA (Dodgeball) - pegar a bola sozinho.
+
+    Como eu descobri, e o que quase me fez entregar coisa quebrada:
+
+    1) O jogo avisa TUDO pelo Blink. Os eventos sao:
+         ThrowStarted  {Destination = CFrame, Duration = n, Origin}
+         CatchStarted  {Player = nome, Session = n}
+         Hit           {Player = nome, Session = n}
+         Reset         n
+       Eu achei que CatchStarted fosse o "pode pegar agora". NAO E: ele
+       e o RESULTADO, avisando quem pegou. O aviso util e o
+       ThrowStarted, que ja vem com o tempo de voo.
+
+    2) MEDIDO em 5 arremessos: o resultado sempre cai em
+       hora do arremesso + Duration, com erro de +-27ms:
+         36.110 + 1.145 = 37.255  -> catch em 37.243  (-12ms)
+         39.293 + 0.700 = 39.993  -> hit   em 40.000  (+ 7ms)
+         44.511 + 0.825 = 45.336  -> catch em 45.356  (+20ms)
+         47.738 + 0.611 = 48.349  -> catch em 48.376  (+27ms)
+       Ou seja: o servidor me entrega o cronometro pronto. Nao preciso
+       adivinhar nada olhando a bola.
+
+    3) Como sei que a bola e pra MIM: o Destination bate com a posicao
+       do alvo. Os arremessos que me acertavam apontavam pro meu lugar;
+       os dos outros iam pra 20-60 studs dali. Por isso o teste de 12
+       studs.
+
+    4) O Parry.Fire PRECISA de um numero. Eu tinha lido as constantes do
+       serializador ("0 | buffer | writeu8") e concluido que nao levava
+       argumento — errado, o writeu8 escrevia o VALOR e o 0 era o
+       deslocamento. Chamando sem argumento da:
+         "Expected Value to be of type number, got nil instead"
+       e o pcall engolia isso. Passei um tempo achando que funcionava
+       quando na verdade quem pegava era voce clicando.
+       Com Parry.Fire(0) funciona. PROVA, com voce sem tocar no mouse:
+         2 arremessos pra mim -> 2 Parry(0) ok -> 2 catch, 0 hit.
+
+    5) O registro de ouvintes do Blink e UMA funcao por evento, nao uma
+       lista. Se eu usasse o .On normal eu SUBSTITUIRIA o ouvinte do
+       jogo e quebraria o catch de verdade. Por isso aqui eu embrulho:
+       guardo o original, ponho o meu, e o meu chama o original.
+===================================================================]]
+
+local P = getgenv().Painel5A46
+if not P then return end
+local souAtual = P.souAtual
+local function avisar(t, x, s) P.notify(t, x, s or 3) end
+
+local Players = game:GetService("Players")
+local RS      = game:GetService("ReplicatedStorage")
+local LP = Players.LocalPlayer
+
+local Q = {
+    ligado = false,
+    antes  = 0.12,   -- disparo esse tanto antes da chegada
+    raio   = 12,     -- so reajo se o destino estiver perto de mim
+    pegou  = 0,
+    tomou  = 0,
+}
+
+-- se uma versao anterior do painel deixou embrulho, desfaz antes
+if getgenv().Queimada5A46 and getgenv().Queimada5A46.restaurar then
+    pcall(getgenv().Queimada5A46.restaurar)
+end
+
+local Blink = RS:FindFirstChild("Blink")
+local okReq, C = pcall(function() return require(Blink.Client) end)
+local ns = okReq and C and C.Dodgeball
+
+local instalado = false
+local restaurar = function() end
+
+if ns and ns.CatchStarted and ns.Parry then
+    local okReg, reg = pcall(function()
+        return debug.getupvalues(ns.CatchStarted.On)[1].Reliable
+    end)
+    if okReg and type(reg) == "table" then
+        -- descobre o id de cada evento: fotografo o registro, registro
+        -- uma sonda pelo caminho normal, vejo qual espaco mudou e
+        -- DEVOLVO o ouvinte do jogo na hora.
+        local ids = {}
+        for _, nome in ipairs({ "ThrowStarted", "CatchStarted", "Hit" }) do
+            if ns[nome] and ns[nome].On then
+                local antes = {}
+                for k, v in pairs(reg) do antes[k] = v end
+                pcall(function() ns[nome].On(function() end) end)
+                for k, v in pairs(reg) do
+                    if v ~= antes[k] then
+                        ids[nome] = k
+                        reg[k] = antes[k]
+                    end
+                end
+            end
+        end
+
+        if ids.ThrowStarted then
+            local originais = {}
+            for nome, id in pairs(ids) do
+                local orig = reg[id]
+                originais[id] = orig
+                reg[id] = function(dados, ...)
+                    if not souAtual() then
+                        -- painel novo carregou: eu saio de cena
+                        reg[id] = orig
+                        return orig and orig(dados, ...)
+                    end
+                    if nome == "ThrowStarted" and Q.ligado
+                        and type(dados) == "table" and dados.Destination then
+                        local hrp = LP.Character
+                            and LP.Character:FindFirstChild("HumanoidRootPart")
+                        local dest = dados.Destination
+                        local pos = (typeof(dest) == "CFrame") and dest.Position or dest
+                        local dist = hrp and (pos - hrp.Position).Magnitude or 1e9
+                        local dur = tonumber(dados.Duration) or 0
+                        if dist <= Q.raio then
+                            task.delay(math.max(dur - Q.antes, 0), function()
+                                if not (Q.ligado and souAtual()) then return end
+                                pcall(function() ns.Parry.Fire(0) end)
+                            end)
+                        end
+                    elseif nome == "CatchStarted" and type(dados) == "table"
+                        and dados.Player == LP.Name then
+                        Q.pegou = Q.pegou + 1
+                    elseif nome == "Hit" and type(dados) == "table"
+                        and dados.Player == LP.Name then
+                        Q.tomou = Q.tomou + 1
+                    end
+                    return orig and orig(dados, ...)
+                end
+            end
+            restaurar = function()
+                for id, o in pairs(originais) do reg[id] = o end
+            end
+            instalado = true
+        end
+    end
+end
+
+--==================================================================
+--                            A ABA
+--==================================================================
+do
+    local aba = P.Tab("Minigames", "◆")
+    local sec = aba:Section("Dodgeball", nil, 1)
+
+    if not instalado then
+        sec:Info("Dodgeball events not found in this place.", 34)
+    else
+        sec:Toggle({ Name = "Auto catch", Default = false, Bell = false,
+            Keybind = { Key = Enum.KeyCode.K },
+            Callback = function(v)
+                Q.ligado = v
+                if v then avisar("Dodgeball", "Auto catch on", 3) end
+            end })
+        -- Os dois numeros ficam FIXOS e ocultos, como voce pediu:
+        --   antes = 0.12s  MEDIDO: no unico catch seu na mao, o clique
+        --                  saiu 133ms antes da bola chegar. Disparar na
+        --                  hora exata da chegada seria tarde.
+        --   raio  = 12     MEDIDO: as bolas pra voce chegavam com
+        --                  Destination a 0.0-2.7 studs; as dos outros,
+        --                  a 15-62. 12 separa os dois casos com folga.
+        -- Pra mexer sem UI: getgenv().Queimada5A46.cfg.antes = 0.15
+        local painel = sec:Info("...", 34)
+        task.spawn(function()
+            while souAtual() do
+                task.wait(1)
+                painel.set(("caught %d   ·   hit %d"):format(Q.pegou, Q.tomou))
+            end
+        end)
+    end
+end
+
+getgenv().Queimada5A46 = { cfg = Q, restaurar = restaurar }
+
+end)()
