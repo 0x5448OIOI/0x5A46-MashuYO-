@@ -4627,7 +4627,7 @@ local LP = Players.LocalPlayer
 
 local Q = {
     ligado = false,
-    antes  = 0.12,   -- disparo esse tanto antes da chegada
+    antes  = 0.03,   -- disparo esse tanto antes da chegada (negativo = depois)
     raio   = 12,     -- so reajo se o destino estiver perto de mim
     pegou  = 0,
     tomou  = 0,
@@ -4727,14 +4727,22 @@ do
                 Q.ligado = v
                 if v then avisar("Dodgeball", "Auto catch on", 3) end
             end })
-        -- Os dois numeros ficam FIXOS e ocultos, como voce pediu:
-        --   antes = 0.12s  MEDIDO: no unico catch seu na mao, o clique
-        --                  saiu 133ms antes da bola chegar. Disparar na
-        --                  hora exata da chegada seria tarde.
-        --   raio  = 12     MEDIDO: as bolas pra voce chegavam com
-        --                  Destination a 0.0-2.7 studs; as dos outros,
-        --                  a 15-62. 12 separa os dois casos com folga.
-        -- Pra mexer sem UI: getgenv().Queimada5A46.cfg.antes = 0.15
+        -- O RAIO fica fixo e oculto: ele acerta bem. MEDIDO, as bolas
+        -- pra voce chegavam com Destination a 0.0-2.7 studs e as dos
+        -- outros a 15-62, entao 12 separa os dois casos com folga.
+        --
+        -- O TEMPO fica a mostra, porque e o que voce quer mexer. Baixei
+        -- o padrao de 0.12 pra 0.03: quanto MENOR o numero, mais tarde
+        -- ele dispara. O 0.12 tinha vindo do seu unico catch na mao (o
+        -- clique saiu 133ms antes da bola chegar), mas isso era voce se
+        -- antecipando — o script nao precisa dessa margem, ele sabe a
+        -- hora exata da chegada pelo Duration.
+        -- Da pra ir pro negativo: ai ele dispara DEPOIS da chegada
+        -- prevista, caso a janela abra mais tarde do que eu acho.
+        sec:Slider({ Name = "Fire before", Min = -0.10, Max = 0.30,
+            Default = 0.03, Decimals = 2, Suffix = "s",
+            Callback = function(v) Q.antes = v end })
+
         local painel = sec:Info("...", 34)
         task.spawn(function()
             while souAtual() do
