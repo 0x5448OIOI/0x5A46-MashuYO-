@@ -1717,7 +1717,7 @@ workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     if workspace.CurrentCamera then Camera = workspace.CurrentCamera end
 end)
 
-win.Title = "0x5A46  ·  Farm"
+win.Title = "0x5A46  ·  MushYO"
 pcall(function() win.TitleLabel.Text = win.Title end)
 
 --==================================================================
@@ -1907,13 +1907,44 @@ end
 -- mas firesignal no Activated fecha o dialogo na hora (31 -> 0). Os
 -- outros dois cliques (fisgada e minigame) funcionam com VIM e ficaram
 -- como estao, porque estao comprovados.
+-- DOIS DEFEITOS QUE EU ACHEI AQUI:
+--
+-- 1) Eu passava Enum.UserInputType.MouseButton1 como 1o argumento do
+--    Activated. O jogo espera um InputObject ali, nao um Enum. Se o
+--    handler dele ler input.UserInputType, quebra e o botao nao faz
+--    nada. Quando eu PROVEI que funcionava (31 descendentes -> 0), a
+--    chamada era firesignal(btn.Activated), sem argumento. Voltei.
+--
+-- 2) Eu testava so a global "firesignal". Se o seu executor chamar de
+--    outro nome, tudo caia no VirtualInputManager — e o VIM comprovado
+--    NAO pega nesse botao. Era exatamente isso: o resto do painel usa
+--    VIM e funciona, so o Capturar precisa de sinal.
+--    Agora eu procuro os apelidos e, se nao achar nenhum, uso
+--    getconnections e chamo a funcao conectada na mao.
+local FIRE = firesignal or fire_signal or replicatesignal
+local GETCON = getconnections or get_signal_cons
+local function dispararSinal(sinal)
+    if FIRE and pcall(FIRE, sinal) then return true end
+    if GETCON then
+        local ok, cons = pcall(GETCON, sinal)
+        if ok and type(cons) == "table" and #cons > 0 then
+            local feito = false
+            for _, c in ipairs(cons) do
+                if type(c.Fire) == "function" then
+                    if pcall(function() c:Fire() end) then feito = true end
+                elseif type(c.Function) == "function" then
+                    if pcall(c.Function) then feito = true end
+                end
+            end
+            if feito then return true end
+        end
+    end
+    return false
+end
 local function apertarPorSinal(b)
     if not b or not b.Parent then return false end
-    local ok = false
-    if firesignal then
-        pcall(function() firesignal(b.MouseButton1Click) ok = true end)
-        pcall(function() firesignal(b.Activated, Enum.UserInputType.MouseButton1) ok = true end)
-    end
+    local ok = dispararSinal(b.MouseButton1Click)
+    if dispararSinal(b.Activated) then ok = true end
     if not ok then return clicarBotao(b) end
     return true
 end
@@ -2088,53 +2119,137 @@ end
 -- arvore e montada fora e enfiada de uma vez, entao quando o pai entra
 -- os filhos ja estavam dentro dele. Por isso aqui e VARREDURA, nao
 -- evento: e o unico jeito que nao tem como escapar.
-local PALAVRAS_GUARDAR = { "catch", "collect", "capturar", "coletar", "keep" }
--- de proposito NAO tem "soltar"/"release": esse e o botao vermelho, que
--- joga o item fora.
-local function ehBotaoDeGuardar(d)
-    if not d:IsA("TextButton") then return false end
-    local ok, t = pcall(function() return d.Text end)
-    if not ok or type(t) ~= "string" then return false end
-    t = string.lower(t:gsub("<[^>]->", ""))
-    for _, p in ipairs(PALAVRAS_GUARDAR) do
+local PALAVRAS_GUARDAR = { "catch", "collect", "capturar", "coletar", "keep", "guardar" }
+-- estas eu NUNCA aperto: e o botao vermelho, que joga o item fora
+local PALAVRAS_SOLTAR = { "soltar", "release", "drop", "descartar", "jogar fora" }
+
+local function limpo(t)
+    if type(t) ~= "string" then return nil end
+    return string.lower((t:gsub("<[^>]->", "")))
+end
+local function bate(t, lista)
+    if not t then return false end
+    for _, p in ipairs(lista) do
         if string.find(t, p, 1, true) then return true end
     end
     return false
 end
+-- o texto pode estar no proprio botao OU num TextLabel dentro dele
+-- (botao com imagem e rotulo por cima, que e o mais comum nesse jogo)
+local function textosDe(d)
+    local ts = {}
+    local ok, t = pcall(function() return d.Text end)
+    if ok then ts[#ts + 1] = limpo(t) end
+    for _, f in ipairs(d:GetDescendants()) do
+        if f:IsA("TextLabel") or f:IsA("TextButton") then
+            local ok2, t2 = pcall(function() return f.Text end)
+            if ok2 then ts[#ts + 1] = limpo(t2) end
+        end
+    end
+    return ts
+end
+local function ehBotaoDeGuardar(d)
+    if not (d:IsA("TextButton") or d:IsA("ImageButton")) then return false end
+    local ts = textosDe(d)
+    -- se qualquer texto dele for de soltar, nao encosto
+    for _, t in ipairs(ts) do
+        if bate(t, PALAVRAS_SOLTAR) then return false end
+    end
+    for _, t in ipairs(ts) do
+        if bate(t, PALAVRAS_GUARDAR) then return true end
+    end
+    return false
+end
+
+-- telas gigantes que nao vale a pena varrer 5x por segundo
+local TELAS_PESADAS = {
+    Windows = true, TopbarStandard = true, Main = true, Chat = true,
+    EmojiPot = true, PlayersList = true, Hotbar = true,
+    MinutesLeaderboardSurfaceGui = true, Backpack = true,
+    FishInventoryScreenGui = true,
+}
 
 do
     local ultimo = 0
+    local function guardou(d)
+        ultimo = os.clock()
+        apertarPorSinal(d)
+        task.wait(0.25)
+        if not d.Parent then
+            stat.peixes = stat.peixes + 1
+            info = "collected"
+            if C.mineOn then
+                mineAlvoAtual = nil
+                statMina.coletas = statMina.coletas + 1
+            end
+            avisar("Farm", "Captured", 2)
+            return true
+        end
+        return false
+    end
+
     task.spawn(function()
         while souAtual() do
             task.wait(0.2)
             if (C.autoOn or C.mineOn) and C.guardar and os.clock() - ultimo > 0.5 then
-                for _, g in ipairs(LP.PlayerGui:GetChildren()) do
-                    -- pula as telas gigantes (Windows tem 5000+ filhos) e a minha
-                    if (g:IsA("ScreenGui") or g:IsA("BillboardGui"))
-                        and not g.Name:find("0x5A46") and g.Enabled then
-                        local filhos = g:GetDescendants()
-                        if #filhos <= 260 then
-                            for _, d in ipairs(filhos) do
-                                if ehBotaoDeGuardar(d) and d.AbsoluteSize.X > 2 then
-                                    ultimo = os.clock()
-                                    apertarPorSinal(d)
-                                    task.wait(0.25)
-                                    if not d.Parent then
-                                        stat.peixes = stat.peixes + 1
-                                        info = "collected"
-                                        -- coletou minerando = aquele minerio
-                                        -- acabou, pode procurar o proximo
-                                        if C.mineOn then
-                                            mineAlvoAtual = nil
-                                            statMina.coletas = statMina.coletas + 1
-                                        end
-                                    end
-                                    break
-                                end
+                local alvo = nil
+                -- 1) caminho rapido pelo NOME da tela. E o mais confiavel:
+                --    nao depende do idioma do Roblox nem do texto do botao.
+                local tela = LP.PlayerGui:FindFirstChild("CatchOrReleaseIndicator")
+                if tela then
+                    local candidatos = {}
+                    for _, d in ipairs(tela:GetDescendants()) do
+                        if (d:IsA("TextButton") or d:IsA("ImageButton"))
+                            and d.AbsoluteSize.X > 2 then
+                            candidatos[#candidatos + 1] = d
+                        end
+                    end
+                    for _, d in ipairs(candidatos) do
+                        if ehBotaoDeGuardar(d) then alvo = d break end
+                    end
+                    -- so tem dois botoes ali: se eu reconheco o de SOLTAR
+                    -- e sobrou exatamente um, o que sobrou e o de guardar
+                    if not alvo and #candidatos == 2 then
+                        local soltar = nil
+                        for _, d in ipairs(candidatos) do
+                            for _, t in ipairs(textosDe(d)) do
+                                if bate(t, PALAVRAS_SOLTAR) then soltar = d break end
+                            end
+                        end
+                        if soltar then
+                            for _, d in ipairs(candidatos) do
+                                if d ~= soltar then alvo = d break end
                             end
                         end
                     end
                 end
+                -- 2) varredura geral (a mineracao nasce em telas com nome
+                --    generico, tipo "ScreenGui", entao nao da pra fixar)
+                if not alvo then
+                    for _, g in ipairs(LP.PlayerGui:GetChildren()) do
+                        if (g:IsA("ScreenGui") or g:IsA("BillboardGui"))
+                            and not g.Name:find("0x5A46")
+                            and not TELAS_PESADAS[g.Name] and g.Enabled then
+                            local filhos = g:GetDescendants()
+                            -- antes eu cortava em 260 descendentes. Era
+                            -- chute meu e podia estar jogando fora a tela
+                            -- certa (o ViewportFrame do peixe leva o
+                            -- modelo inteiro junto). Subi bem o teto.
+                            if #filhos <= 2000 then
+                                for _, d in ipairs(filhos) do
+                                    if (d:IsA("TextButton") or d:IsA("ImageButton"))
+                                        and d.AbsoluteSize.X > 2
+                                        and ehBotaoDeGuardar(d) then
+                                        alvo = d
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                        if alvo then break end
+                    end
+                end
+                if alvo then guardou(alvo) end
             end
         end
     end)
