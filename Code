@@ -1719,7 +1719,7 @@ workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     if workspace.CurrentCamera then Camera = workspace.CurrentCamera end
 end)
 
-win.Title = "0x5A46  ·  Farm"
+win.Title = "0x5A46  ·  MushYO"
 pcall(function() win.TitleLabel.Text = win.Title end)
 
 --==================================================================
@@ -3552,6 +3552,7 @@ local J = {
     fly        = false,
     flyVel     = 1,
     clickTP    = false,
+
 }
 
 local abaJog = P.Tab("Player", "●")
@@ -4945,5 +4946,1032 @@ end
 getgenv().Sinuca5A46 = S
 
 getgenv().Queimada5A46 = { cfg = Q, restaurar = restaurar }
+
+end)()
+
+;(function()
+--[[=================================================================
+    VISUAL  ·  aba do painel 0x5A46
+    -------------------------------------------------------------------
+    Tudo aqui e do SEU cliente. Nao mexe em nada do servidor, ninguem
+    mais ve, e nada disso e enviado pra lugar nenhum.
+
+    O que eu MEDI antes de escrever:
+      · Lighting.Technology aceita ser trocado por script neste jogo.
+        Testei: ShadowMap -> Future funcionou e voltou. E esse o "RTX"
+        de verdade (sombras por pixel e luz refletida), nao um filtro.
+      · O jogo JA TEM uma pasta Lighting.Skyboxes com 4 ceus prontos:
+        Sunset, Default, Night e Cyber. Por isso eu nao invento
+        asset id de ceu: uso os que ele traz, que com certeza carregam.
+      · Ja existe um Atmosphere (escrito "Deafult" mesmo, typo deles)
+        com Density 0.30, Haze 0.95, Glare 2.26. Neblina aqui e mexer
+        nele, nao no FogEnd velho.
+      · Tem tambem uma pasta Rays com dois SunRaysEffect (Sunset e
+        Normal) e efeitos de ColorCorrection/DepthOfField ja montados.
+
+    Guardo o valor original de tudo que toco e devolvo quando voce
+    desliga — inclusive se voce recarregar o painel por cima.
+===================================================================]]
+
+local P = getgenv().Painel5A46
+if not P then return end
+local souAtual = P.souAtual
+
+local Lighting   = game:GetService("Lighting")
+local RunService = game:GetService("RunService")
+local Players    = game:GetService("Players")
+local LP = Players.LocalPlayer
+
+local Camera = workspace.CurrentCamera
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    if workspace.CurrentCamera then Camera = workspace.CurrentCamera end
+end)
+
+-- se uma versao anterior mexeu em algo, devolve antes de comecar
+if getgenv().Visual5A46 and getgenv().Visual5A46.restaurar then
+    pcall(getgenv().Visual5A46.restaurar)
+end
+-- e varre qualquer sobra minha que tenha ficado orfa (painel fechado no
+-- meio, teste antigo, etc) — senao o "original" que eu guardo embaixo
+-- ja viria sujo com efeito meu de outra vez.
+-- primeiro resgata: se um ceu do JOGO ficou estacionado na minha pasta,
+-- ele volta pro Lighting antes de eu apagar qualquer coisa.
+local sobra = Lighting:FindFirstChild("0x5A46_ceuGuardado")
+if sobra then
+    local perdido = sobra:FindFirstChildOfClass("Sky")
+    if perdido then perdido.Parent = Lighting end
+    sobra:Destroy()
+end
+for _, c in ipairs(Lighting:GetChildren()) do
+    if c.Name:sub(1, 7) == "0x5A46_" then c:Destroy() end
+end
+for _, c in ipairs(workspace:GetChildren()) do
+    if c.Name == "0x5A46_neve" then c:Destroy() end
+end
+
+--==================================================================
+--        GUARDA O ORIGINAL  (pra conseguir desfazer de verdade)
+--==================================================================
+local ORIG = {
+    Technology   = Lighting.Technology,
+    Brightness   = Lighting.Brightness,
+    ClockTime    = Lighting.ClockTime,
+    Ambient      = Lighting.Ambient,
+    OutdoorAmbient = Lighting.OutdoorAmbient,
+    GlobalShadows  = Lighting.GlobalShadows,
+    ExposureCompensation = Lighting.ExposureCompensation,
+    FogEnd       = Lighting.FogEnd,
+}
+local atm = Lighting:FindFirstChildOfClass("Atmosphere")
+if atm then
+    ORIG.Density = atm.Density
+    ORIG.Haze    = atm.Haze
+    ORIG.Glare   = atm.Glare
+end
+local ceuOrig = Lighting:FindFirstChildOfClass("Sky")
+local ceuOrigNome = ceuOrig and ceuOrig.Name or nil
+
+local V = {
+    rtx        = false,
+    prenderHora= false,
+    hora       = 14,
+    neve       = false,
+    intensidade= 1,
+}
+
+--==================================================================
+--                          RTX
+--==================================================================
+-- Nao e filtro: troca a tecnologia de luz do jogo pra Future, liga
+-- sombra global e sobe a luz do ambiente. E o que muda de verdade.
+local meusEfeitos = {}
+local function limparEfeitos()
+    for _, e in ipairs(meusEfeitos) do pcall(function() e:Destroy() end) end
+    meusEfeitos = {}
+end
+local function ligarRtx(v)
+    V.rtx = v
+    if v then
+        pcall(function() Lighting.Technology = Enum.Technology.Future end)
+        Lighting.GlobalShadows = true
+        Lighting.EnvironmentDiffuseScale  = 1
+        Lighting.EnvironmentSpecularScale = 1
+        limparEfeitos()
+        local bloom = Instance.new("BloomEffect")
+        bloom.Name = "0x5A46_bloom"
+        bloom.Intensity = 0.6 * V.intensidade
+        bloom.Size = 24
+        bloom.Threshold = 1.1
+        bloom.Parent = Lighting
+        local cc = Instance.new("ColorCorrectionEffect")
+        cc.Name = "0x5A46_cc"
+        cc.Saturation = 0.18 * V.intensidade
+        cc.Contrast = 0.12 * V.intensidade
+        cc.Brightness = 0.02
+        cc.Parent = Lighting
+        local sr = Instance.new("SunRaysEffect")
+        sr.Name = "0x5A46_rays"
+        sr.Intensity = 0.12 * V.intensidade
+        sr.Spread = 0.9
+        sr.Parent = Lighting
+        meusEfeitos = { bloom, cc, sr }
+    else
+        pcall(function() Lighting.Technology = ORIG.Technology end)
+        Lighting.GlobalShadows = ORIG.GlobalShadows
+        limparEfeitos()
+    end
+end
+
+--==================================================================
+--                          HORA DO DIA
+--==================================================================
+-- O jogo tem ciclo proprio, entao nao adianta setar uma vez: se voce
+-- prender a hora eu reponho todo segundo.
+task.spawn(function()
+    while souAtual() do
+        task.wait(0.5)
+        if V.prenderHora and math.abs(Lighting.ClockTime - V.hora) > 0.01 then
+            Lighting.ClockTime = V.hora
+        end
+    end
+end)
+
+--==================================================================
+--                            NEVE
+--==================================================================
+-- Uma placa invisivel presa acima da camera soltando particula pra
+-- baixo. Fica sempre com voce, entao neva em qualquer lugar do mapa.
+local placaNeve, emissorNeve, conNeve
+local function ligarNeve(v)
+    V.neve = v
+    if v then
+        if not placaNeve then
+            placaNeve = Instance.new("Part")
+            placaNeve.Name = "0x5A46_neve"
+            placaNeve.Size = Vector3.new(60, 1, 60)
+            placaNeve.Transparency = 1
+            placaNeve.CanCollide = false
+            placaNeve.CanQuery = false
+            placaNeve.CanTouch = false
+            placaNeve.Anchored = true
+            placaNeve.Parent = workspace
+            emissorNeve = Instance.new("ParticleEmitter")
+            emissorNeve.Texture = "rbxasset://textures/particles/sparkles_main.dds"
+            emissorNeve.Color = ColorSequence.new(Color3.fromRGB(255, 255, 255))
+            emissorNeve.Size = NumberSequence.new(0.35)
+            emissorNeve.Transparency = NumberSequence.new(0.25)
+            emissorNeve.Lifetime = NumberRange.new(4, 6)
+            emissorNeve.Rate = 220
+            emissorNeve.Speed = NumberRange.new(6, 11)
+            emissorNeve.SpreadAngle = Vector2.new(18, 18)
+            emissorNeve.Rotation = NumberRange.new(0, 360)
+            emissorNeve.RotSpeed = NumberRange.new(-40, 40)
+            emissorNeve.Acceleration = Vector3.new(1.5, -3, 0)
+            emissorNeve.LightEmission = 0.4
+            emissorNeve.EmissionDirection = Enum.NormalId.Bottom
+            emissorNeve.Parent = placaNeve
+        end
+        emissorNeve.Enabled = true
+        if conNeve then conNeve:Disconnect() end
+        conNeve = RunService.Heartbeat:Connect(function()
+            if not (souAtual() and V.neve) then return end
+            if placaNeve and Camera then
+                placaNeve.CFrame = CFrame.new(Camera.CFrame.Position + Vector3.new(0, 28, 0))
+            end
+        end)
+    else
+        if emissorNeve then emissorNeve.Enabled = false end
+        if conNeve then conNeve:Disconnect() conNeve = nil end
+        task.delay(7, function()
+            if not V.neve and placaNeve then placaNeve:Destroy() placaNeve = nil emissorNeve = nil end
+        end)
+    end
+end
+
+--==================================================================
+--                            CEU
+--==================================================================
+-- O ceu que o jogo comecou nao pode ser destruido nem virar copia: eu
+-- guardo a instancia original num canto e SEMPRE ponho copia minha no
+-- Lighting. Assim trocar mil vezes nao suja a pasta Skyboxes do jogo.
+for _, c in ipairs(Lighting:GetChildren()) do
+    if c.Name == "0x5A46_ceuGuardado" then c:Destroy() end
+end
+local guarda = Instance.new("Folder")
+guarda.Name = "0x5A46_ceuGuardado"
+guarda.Parent = Lighting
+
+local function tirarCeuAtual()
+    local atual = Lighting:FindFirstChildOfClass("Sky")
+    if not atual then return end
+    if atual == ceuOrig then
+        atual.Parent = guarda           -- o do jogo: so estaciona
+    else
+        atual:Destroy()                 -- copia minha: pode ir embora
+    end
+end
+
+local function trocarCeu(nome)
+    local pasta = Lighting:FindFirstChild("Skyboxes")
+    if not pasta then return false end
+    local novo = pasta:FindFirstChild(nome)
+    if not novo or not novo:IsA("Sky") then return false end
+    tirarCeuAtual()
+    local copia = novo:Clone()
+    copia.Name = "0x5A46_ceu_" .. novo.Name
+    copia.Parent = Lighting
+    return true
+end
+
+local function ceuPorId(id)
+    id = tostring(id):gsub("%D", "")
+    if id == "" then return false end
+    tirarCeuAtual()
+    local s = Instance.new("Sky")
+    s.Name = "0x5A46_ceu"
+    local u = "rbxassetid://" .. id
+    s.SkyboxUp, s.SkyboxDn, s.SkyboxLf, s.SkyboxRt, s.SkyboxFt, s.SkyboxBk = u, u, u, u, u, u
+    s.Parent = Lighting
+    return true
+end
+
+local function ceuDeVolta()
+    if not ceuOrig then return end
+    tirarCeuAtual()
+    ceuOrig.Parent = Lighting
+end
+
+--==================================================================
+--                        DESFAZER TUDO
+--==================================================================
+local function restaurar()
+    pcall(function() Lighting.Technology = ORIG.Technology end)
+    Lighting.Brightness = ORIG.Brightness
+    Lighting.Ambient = ORIG.Ambient
+    Lighting.OutdoorAmbient = ORIG.OutdoorAmbient
+    Lighting.GlobalShadows = ORIG.GlobalShadows
+    Lighting.ExposureCompensation = ORIG.ExposureCompensation
+    Lighting.FogEnd = ORIG.FogEnd
+    local a = Lighting:FindFirstChildOfClass("Atmosphere")
+    if a and ORIG.Density then
+        a.Density, a.Haze, a.Glare = ORIG.Density, ORIG.Haze, ORIG.Glare
+    end
+    limparEfeitos()
+    V.prenderHora = false
+    V.neve = false
+    if emissorNeve then emissorNeve.Enabled = false end
+    if conNeve then conNeve:Disconnect() conNeve = nil end
+    if placaNeve then placaNeve:Destroy() placaNeve = nil emissorNeve = nil end
+    pcall(ceuDeVolta)
+end
+
+--==================================================================
+--                            A ABA
+--==================================================================
+do
+    local aba = P.Tab("Visual", "◈")
+
+    local s1 = aba:Section("Lighting", nil, 1)
+    s1:Toggle({ Name = "RTX", Default = false, Bell = false,
+        Callback = function(v) ligarRtx(v) end })
+    s1:Slider({ Name = "Effect strength", Min = 0, Max = 2, Default = 1, Decimals = 2,
+        Callback = function(v) V.intensidade = v if V.rtx then ligarRtx(true) end end })
+    s1:Slider({ Name = "Brightness", Min = 0, Max = 6, Default = ORIG.Brightness, Decimals = 1,
+        Callback = function(v) Lighting.Brightness = v end })
+    s1:Slider({ Name = "Exposure", Min = -1, Max = 1, Default = ORIG.ExposureCompensation,
+        Decimals = 2, Callback = function(v) Lighting.ExposureCompensation = v end })
+    s1:Button({ Name = "Reset lighting", Callback = restaurar })
+
+    local s2 = aba:Section("Time", nil, 1)
+    s2:Toggle({ Name = "Lock time", Default = false, Bell = false,
+        Callback = function(v) V.prenderHora = v end })
+    s2:Slider({ Name = "Hour", Min = 0, Max = 24, Default = 14, Decimals = 1,
+        Callback = function(v) V.hora = v Lighting.ClockTime = v end })
+    s2:Button({ Name = "Day", Callback = function()
+        V.hora = 14 V.prenderHora = true Lighting.ClockTime = 14
+    end })
+    s2:Button({ Name = "Night", Callback = function()
+        V.hora = 0 V.prenderHora = true Lighting.ClockTime = 0
+    end })
+
+    local s3 = aba:Section("Sky", nil, 2)
+    -- os quatro sao os que o proprio jogo traz em Lighting.Skyboxes
+    local ceus = { "Default", "Sunset", "Night", "Cyber" }
+    local dd = s3:Dropdown({ Name = "Skybox", Items = ceus, Default = ceuOrigNome or "Default" })
+    s3:Button({ Name = "Apply sky", Callback = function() trocarCeu(dd:Get()) end })
+    local caixa = s3:Input({ Name = "Custom sky id", Placeholder = "asset id" })
+    s3:Button({ Name = "Apply custom", Callback = function() ceuPorId(caixa.Text) end })
+
+    local s4 = aba:Section("Weather", nil, 2)
+    s4:Toggle({ Name = "Snow", Default = false, Bell = false,
+        Callback = function(v) ligarNeve(v) end })
+    -- neblina de verdade e o Atmosphere, nao o FogEnd antigo
+    s4:Slider({ Name = "Fog", Min = 0, Max = 1, Default = ORIG.Density or 0.3, Decimals = 2,
+        Callback = function(v)
+            local a = Lighting:FindFirstChildOfClass("Atmosphere")
+            if a then a.Density = v end
+        end })
+    s4:Slider({ Name = "Haze", Min = 0, Max = 5, Default = ORIG.Haze or 0.95, Decimals = 2,
+        Callback = function(v)
+            local a = Lighting:FindFirstChildOfClass("Atmosphere")
+            if a then a.Haze = v end
+        end })
+    s4:Slider({ Name = "Glare", Min = 0, Max = 5, Default = ORIG.Glare or 2.26, Decimals = 2,
+        Callback = function(v)
+            local a = Lighting:FindFirstChildOfClass("Atmosphere")
+            if a then a.Glare = v end
+        end })
+end
+
+getgenv().Visual5A46 = { cfg = V, restaurar = restaurar }
+
+end)()
+
+;(function()
+--[[=================================================================
+    EXTRAS  ·  aba do painel 0x5A46
+    -------------------------------------------------------------------
+    Aqui vai o que nao e farm nem visual: servidor, camera, desempenho
+    e atalhos de sessao. Tudo do SEU cliente.
+
+    Regra que eu sigo o arquivo inteiro: nada de mexer sem guardar o
+    valor de antes. Toda coisa que eu ligo aqui volta atras sozinha
+    quando voce desliga, e volta tambem se voce recarregar o painel
+    por cima — senao a segunda execucao ia gravar como "original" um
+    estado que eu mesmo tinha estragado.
+===================================================================]]
+
+local P = getgenv().Painel5A46
+if not P then return end
+local souAtual = P.souAtual
+local function avisar(t, x, s) P.notify(t, x, s or 3) end
+
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS        = game:GetService("UserInputService")
+local CAS        = game:GetService("ContextActionService")
+local TS         = game:GetService("TeleportService")
+local HttpS      = game:GetService("HttpService")
+local Lighting   = game:GetService("Lighting")
+local StatsS     = game:GetService("Stats")
+local LP = Players.LocalPlayer
+
+local Camera = workspace.CurrentCamera
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    if workspace.CurrentCamera then Camera = workspace.CurrentCamera end
+end)
+
+-- desfaz o que a versao anterior deixou ligado
+if getgenv().Extras5A46 and getgenv().Extras5A46.restaurar then
+    pcall(getgenv().Extras5A46.restaurar)
+end
+for _, n in ipairs({ "HUD_0x5A46" }) do
+    local v = P.RAIZ:FindFirstChild(n)
+    if v then pcall(function() v:Destroy() end) end
+end
+
+--==================================================================
+--   O QUE O EXECUTOR TEM  (eu testo, nao presumo que existe)
+--==================================================================
+local function pegar(...)
+    for _, nome in ipairs({ ... }) do
+        local f = rawget(getgenv(), nome)
+        if type(f) == "function" then return f end
+    end
+    return nil
+end
+local REQ  = pegar("request", "http_request")
+    or (rawget(getgenv(), "syn") and rawget(getgenv(), "syn").request)
+    or (rawget(getgenv(), "http") and rawget(getgenv(), "http").request)
+local CLIP = pegar("setclipboard", "toclipboard")
+local FILA = pegar("queue_on_teleport")
+    or (rawget(getgenv(), "syn") and rawget(getgenv(), "syn").queue_on_teleport)
+local CAP  = pegar("setfpscap", "set_fps_cap")
+local ESCREVER, LER, TEM = pegar("writefile"), pegar("readfile"), pegar("isfile")
+
+local ARQ = "painel_0x5A46_extras.json"
+
+--==================================================================
+--                       CONFIG (salva em disco)
+--==================================================================
+local E = {
+    antiAfk   = false,
+    autoRejoin= false,
+    fonte     = "",          -- o loadstring pra rodar de novo depois do hop
+    modoHop   = "Emptiest",
+    freeVel   = 60,
+    sens      = 1,
+    fov       = Camera.FieldOfView,
+    zoomLivre = false,
+    avisoGente= false,
+    achatarMat= false,       -- FPS boost tambem achata material? (deixa tudo plastico)
+    slots     = {},          -- posicoes salvas
+}
+local function salvar()
+    if not ESCREVER then return end
+    pcall(function() ESCREVER(ARQ, HttpS:JSONEncode(E)) end)
+end
+if LER and TEM then
+    pcall(function()
+        if TEM(ARQ) then
+            local d = HttpS:JSONDecode(LER(ARQ))
+            for k, v in pairs(d) do if E[k] ~= nil then E[k] = v end end
+        end
+    end)
+end
+
+--==================================================================
+--                      GUARDA O ORIGINAL
+--==================================================================
+local ORIG = {
+    zoomMax = LP.CameraMaxZoomDistance,
+    zoomMin = LP.CameraMinZoomDistance,
+    fov     = Camera.FieldOfView,
+}
+
+--==================================================================
+--     DESFAZER GENERICO  (usado pelo FPS boost)
+--     Guardo instancia + propriedade + valor de antes, na ordem.
+--==================================================================
+local desfazer = {}
+local function mexer(o, p, v)
+    local ok, antes = pcall(function() return o[p] end)
+    if not ok or antes == v then return end
+    table.insert(desfazer, { o = o, p = p, v = antes })
+    pcall(function() o[p] = v end)
+end
+local function desfazerTudo()
+    -- ao contrario: a ultima coisa que eu mexi e a primeira a voltar.
+    -- Respiro a cada 900 senao o jogo trava na hora de desligar.
+    for i = #desfazer, 1, -1 do
+        local d = desfazer[i]
+        pcall(function() d.o[d.p] = d.v end)
+        if i % 900 == 0 then task.wait() end
+    end
+    desfazer = {}
+end
+
+--==================================================================
+--                        FPS BOOST
+--==================================================================
+-- Nao apago nada do mapa: so desligo o que custa caro pra desenhar e
+-- anoto o estado de antes. Pulo tudo que comeca com 0x5A46_ pra nao
+-- matar a neve da aba Visual nem as marcas do ESP.
+local boostLigado, conBoost = false, nil
+
+local function ehMeu(o)
+    return typeof(o) == "Instance" and o.Name:sub(1, 7) == "0x5A46_"
+end
+
+local function baixarUm(o)
+    if ehMeu(o) then return end
+    if o:IsA("ParticleEmitter") or o:IsA("Trail") or o:IsA("Smoke")
+        or o:IsA("Fire") or o:IsA("Sparkles") or o:IsA("Beam") then
+        mexer(o, "Enabled", false)
+    elseif o:IsA("Decal") or o:IsA("Texture") then
+        mexer(o, "Transparency", 1)
+    elseif o:IsA("PointLight") or o:IsA("SpotLight") or o:IsA("SurfaceLight") then
+        mexer(o, "Enabled", false)
+    elseif o:IsA("BasePart") then
+        if o:IsA("MeshPart") then
+            mexer(o, "RenderFidelity", Enum.RenderFidelity.Performance)
+        end
+        -- achatar material da FPS de graca, mas deixa o mapa todo de
+        -- plastico. Por isso e opcional e nao vem ligado.
+        if E.achatarMat then
+            mexer(o, "Material", Enum.Material.SmoothPlastic)
+            mexer(o, "Reflectance", 0)
+        end
+    elseif o:IsA("PostEffect") then
+        mexer(o, "Enabled", false)
+    end
+end
+
+local function fpsBoost(v)
+    boostLigado = v
+    if v then
+        local n = 0
+        for _, o in ipairs(workspace:GetDescendants()) do
+            baixarUm(o)
+            n = n + 1
+            if n % 900 == 0 then task.wait() end
+            if not boostLigado then return end
+        end
+        for _, o in ipairs(Lighting:GetDescendants()) do baixarUm(o) end
+        local terr = workspace:FindFirstChildOfClass("Terrain")
+        if terr then
+            mexer(terr, "WaterWaveSize", 0)
+            mexer(terr, "WaterWaveSpeed", 0)
+            mexer(terr, "WaterReflectance", 0)
+            mexer(terr, "WaterTransparency", 0)
+        end
+        mexer(Lighting, "GlobalShadows", false)
+        mexer(Lighting, "EnvironmentDiffuseScale", 0)
+        mexer(Lighting, "EnvironmentSpecularScale", 0)
+        -- MEDIDO: settings().Rendering.QualityLevel aceita escrita mas nao
+        -- muda o desenho. Quem manda de verdade e o SavedQualityLevel do
+        -- UserGameSettings — foi ele que baixou o GraphicsQualityLevel.
+        pcall(function()
+            local u = UserSettings():GetService("UserGameSettings")
+            mexer(u, "SavedQualityLevel", Enum.SavedQualitySetting.QualityLevel1)
+        end)
+        -- o que nascer depois tambem entra
+        if conBoost then conBoost:Disconnect() end
+        conBoost = workspace.DescendantAdded:Connect(function(o)
+            if souAtual() and boostLigado then task.defer(baixarUm, o) end
+        end)
+        avisar("Extras", "FPS boost on · " .. #desfazer .. " objects lowered", 4)
+    else
+        if conBoost then conBoost:Disconnect() conBoost = nil end
+        desfazerTudo()
+        avisar("Extras", "FPS boost off · everything restored", 3)
+    end
+end
+
+--==================================================================
+--                          ANTI AFK
+--==================================================================
+-- O Roblox chuta em ~20 min parado. O Idled dispara pouco antes; eu
+-- respondo com um clique de mentira e o contador zera.
+LP.Idled:Connect(function()
+    if not (souAtual() and E.antiAfk) then return end
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        vu:CaptureController()
+        vu:ClickButton2(Vector2.new())
+    end)
+end)
+
+--==================================================================
+--                         SERVIDORES
+--==================================================================
+local function prepararFila()
+    if FILA and E.fonte ~= "" then pcall(FILA, E.fonte) end
+end
+
+local function buscarServidores(paginas)
+    if not REQ then return nil, "your executor has no request()" end
+    local lista, cursor = {}, nil
+    for _ = 1, (paginas or 3) do
+        local url = "https://games.roblox.com/v1/games/" .. game.PlaceId
+            .. "/servers/Public?sortOrder=Desc&limit=100"
+        if cursor then url = url .. "&cursor=" .. cursor end
+        local ok, res = pcall(REQ, { Url = url, Method = "GET" })
+        if not ok or type(res) ~= "table" then break end
+        local corpo  = res.Body or res.body
+        local codigo = res.StatusCode or res.status_code or res.Status
+        if codigo ~= 200 or not corpo then break end
+        local ok2, dados = pcall(function() return HttpS:JSONDecode(corpo) end)
+        if not ok2 or type(dados) ~= "table" or type(dados.data) ~= "table" then break end
+        for _, s in ipairs(dados.data) do
+            if s.id ~= game.JobId and s.playing and s.maxPlayers
+                and s.playing < s.maxPlayers then
+                table.insert(lista, s)
+            end
+        end
+        cursor = dados.nextPageCursor
+        if not cursor then break end
+        task.wait(0.15)
+    end
+    if #lista == 0 then return nil, "no other server answered" end
+    return lista
+end
+
+local function pular(modo)
+    avisar("Extras", "Looking for servers...", 2)
+    local lista, porque = buscarServidores(3)
+    if not lista then
+        avisar("Extras", (porque or "failed") .. " — jumping at random", 4)
+        prepararFila()
+        pcall(function() TS:Teleport(game.PlaceId, LP) end)
+        return
+    end
+    table.sort(lista, function(a, b)
+        if modo == "Fullest" then return a.playing > b.playing end
+        return a.playing < b.playing
+    end)
+    local alvo = (modo == "Random") and lista[math.random(#lista)] or lista[1]
+    avisar("Extras", "Hopping · " .. alvo.playing .. "/" .. alvo.maxPlayers
+        .. " players (" .. #lista .. " found)", 4)
+    prepararFila()
+    pcall(function() TS:TeleportToPlaceInstance(game.PlaceId, alvo.id, LP) end)
+end
+
+local function rejuntar()
+    prepararFila()
+    local ok = pcall(function() TS:TeleportToPlaceInstance(game.PlaceId, game.JobId, LP) end)
+    if not ok then pcall(function() TS:Teleport(game.PlaceId, LP) end) end
+end
+
+-- auto rejoin: quando aparece a janelinha de erro do Roblox
+task.spawn(function()
+    local cg = game:FindFirstChild("CoreGui")
+    if not cg then return end
+    local ok, overlay = pcall(function()
+        return cg:WaitForChild("RobloxPromptGui", 15):WaitForChild("promptOverlay", 15)
+    end)
+    if not ok or not overlay then return end
+    overlay.ChildAdded:Connect(function(c)
+        if not (souAtual() and E.autoRejoin) then return end
+        if c.Name:lower():find("error") then
+            task.wait(1)
+            prepararFila()
+            pcall(function() TS:Teleport(game.PlaceId, LP) end)
+        end
+    end)
+end)
+
+--==================================================================
+--                          FREECAM
+--==================================================================
+-- Camera solta do boneco. O olhar so mexe com o BOTAO DIREITO segurado
+-- — de proposito: se eu prendesse o mouse voce nao conseguia clicar no
+-- painel enquanto estivesse voando.
+local livre, conLivre = false, nil
+local camAntes = {}
+local TECLAS_MOV = {
+    Enum.PlayerActions.CharacterForward, Enum.PlayerActions.CharacterBackward,
+    Enum.PlayerActions.CharacterLeft, Enum.PlayerActions.CharacterRight,
+    Enum.PlayerActions.CharacterJump,
+}
+
+local function freecam(v)
+    livre = v
+    if v then
+        camAntes.tipo = Camera.CameraType
+        camAntes.alvo = Camera.CameraSubject
+        local pos = Camera.CFrame.Position
+        local pitch, yaw = Camera.CFrame:ToOrientation()
+        Camera.CameraType = Enum.CameraType.Scriptable
+        -- trava o boneco: em vez de zerar WalkSpeed (que briga com a aba
+        -- Player) eu engulo as acoes de andar no nivel do input
+        CAS:BindActionAtPriority("0x5A46_freeMov",
+            function() return Enum.ContextActionResult.Sink end,
+            false, Enum.ContextActionPriority.High.Value, unpack(TECLAS_MOV))
+        if conLivre then conLivre:Disconnect() end
+        conLivre = RunService.RenderStepped:Connect(function(dt)
+            if not (souAtual() and livre) then return end
+            if UIS:GetFocusedTextBox() then return end
+            if UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then
+                UIS.MouseBehavior = Enum.MouseBehavior.LockCurrentPosition
+                local d = UIS:GetMouseDelta()
+                yaw   = yaw - d.X * 0.0045 * E.sens
+                pitch = math.clamp(pitch - d.Y * 0.0045 * E.sens, -1.45, 1.45)
+            else
+                UIS.MouseBehavior = Enum.MouseBehavior.Default
+            end
+            local rot = CFrame.fromOrientation(pitch, yaw, 0)
+            local dir = Vector3.zero
+            if UIS:IsKeyDown(Enum.KeyCode.W) then dir = dir + rot.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.S) then dir = dir - rot.LookVector end
+            if UIS:IsKeyDown(Enum.KeyCode.D) then dir = dir + rot.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.A) then dir = dir - rot.RightVector end
+            if UIS:IsKeyDown(Enum.KeyCode.E) then dir = dir + Vector3.yAxis end
+            if UIS:IsKeyDown(Enum.KeyCode.Q) then dir = dir - Vector3.yAxis end
+            local vel = E.freeVel
+            if UIS:IsKeyDown(Enum.KeyCode.LeftShift) then vel = vel * 3 end
+            if UIS:IsKeyDown(Enum.KeyCode.LeftControl) then vel = vel * 0.25 end
+            if dir.Magnitude > 0 then pos = pos + dir.Unit * vel * dt end
+            Camera.CFrame = CFrame.new(pos) * rot
+        end)
+    else
+        if conLivre then conLivre:Disconnect() conLivre = nil end
+        pcall(function() CAS:UnbindAction("0x5A46_freeMov") end)
+        UIS.MouseBehavior = Enum.MouseBehavior.Default
+        Camera.CameraType = camAntes.tipo or Enum.CameraType.Custom
+        if camAntes.alvo then Camera.CameraSubject = camAntes.alvo
+        else
+            local h = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+            if h then Camera.CameraSubject = h end
+        end
+    end
+end
+
+--==================================================================
+--                          ESPIAR
+--==================================================================
+local espiando, alvoEspiado = false, nil
+local function espiar(v, nome)
+    espiando = v
+    if v then
+        local p = Players:FindFirstChild(nome or "")
+        local h = p and p.Character and p.Character:FindFirstChildOfClass("Humanoid")
+        if not h then
+            espiando = false
+            avisar("Extras", "That player has no character loaded", 3)
+            return false
+        end
+        alvoEspiado = p
+        Camera.CameraSubject = h
+        return true
+    else
+        alvoEspiado = nil
+        local h = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+        if h then Camera.CameraSubject = h end
+        return true
+    end
+end
+-- se o alvo morre/sai, a camera volta pra mim sozinha
+task.spawn(function()
+    while souAtual() do
+        task.wait(1)
+        if espiando and alvoEspiado then
+            local h = alvoEspiado.Character and alvoEspiado.Character:FindFirstChildOfClass("Humanoid")
+            if not h or not alvoEspiado.Parent then
+                espiar(false)
+            elseif Camera.CameraSubject ~= h then
+                Camera.CameraSubject = h
+            end
+        end
+    end
+end)
+
+--==================================================================
+--                    POSICOES SALVAS
+--==================================================================
+local function raiz()
+    local c = LP.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+-- um CFrame so nao gruda neste jogo (medido antes, nos teleportes da
+-- aba Farm): tem que insistir por um tempo.
+local function firmar(cf, seg)
+    local fim = os.clock() + (seg or 1.5)
+    while os.clock() < fim and souAtual() do
+        local r = raiz()
+        if r then r.CFrame = cf end
+        RunService.Heartbeat:Wait()
+    end
+end
+local function salvarSlot(n)
+    local r = raiz()
+    if not r then avisar("Extras", "No character", 2) return end
+    local p = r.Position
+    E.slots[tostring(n)] = { p.X, p.Y, p.Z }
+    salvar()
+    avisar("Extras", "Slot " .. n .. " saved", 2)
+end
+local function irSlot(n)
+    local s = E.slots[tostring(n)]
+    if not s then avisar("Extras", "Slot " .. n .. " is empty", 2) return end
+    firmar(CFrame.new(s[1], s[2], s[3]))
+end
+
+--==================================================================
+--                            HUD
+--==================================================================
+local hud, hudTxt, conHud
+local quadros, marcaFps = 0, os.clock()
+local fpsAtual = 0
+local nasceu = os.clock()
+
+local function pingMs()
+    local ok, v = pcall(function()
+        return StatsS.Network.ServerStatsItem["Data Ping"]:GetValue()
+    end)
+    return ok and math.floor(v) or -1
+end
+
+local function montarHud()
+    if hud then return end
+    hud = P.new("ScreenGui", {
+        Name = "HUD_0x5A46", ResetOnSpawn = false, IgnoreGuiInset = true,
+        ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 997, Parent = P.RAIZ,
+    })
+    local caixa = P.new("Frame", {
+        Position = UDim2.fromOffset(18, 18), Size = UDim2.fromOffset(158, 76),
+        BackgroundColor3 = Color3.fromRGB(12, 12, 12), BackgroundTransparency = 0.15,
+        BorderSizePixel = 0, Parent = hud,
+    })
+    P.corner(10, caixa)
+    P.stroke(Color3.fromRGB(42, 42, 42), caixa, 1, 0.3)
+    hudTxt = P.new("TextLabel", {
+        Size = UDim2.new(1, -20, 1, -12), Position = UDim2.fromOffset(10, 6),
+        BackgroundTransparency = 1, Font = Enum.Font.Gotham, Text = "", TextSize = 11,
+        TextColor3 = Color3.fromRGB(210, 210, 210),
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Top, RichText = true, Parent = caixa,
+    })
+    -- arrastavel
+    local puxando, iniPos, iniMouse
+    caixa.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch then
+            puxando, iniPos, iniMouse = true, caixa.Position, i.Position
+            i.Changed:Connect(function()
+                if i.UserInputState == Enum.UserInputState.End then puxando = false end
+            end)
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if not (puxando and souAtual()) then return end
+        if i.UserInputType == Enum.UserInputType.MouseMovement
+            or i.UserInputType == Enum.UserInputType.Touch then
+            local d = i.Position - iniMouse
+            caixa.Position = UDim2.new(iniPos.X.Scale, iniPos.X.Offset + d.X,
+                                       iniPos.Y.Scale, iniPos.Y.Offset + d.Y)
+        end
+    end)
+end
+
+RunService.RenderStepped:Connect(function()
+    if not souAtual() then return end
+    quadros = quadros + 1
+    local agora = os.clock()
+    if agora - marcaFps >= 0.5 then
+        fpsAtual = math.floor(quadros / (agora - marcaFps) + 0.5)
+        quadros, marcaFps = 0, agora
+    end
+end)
+
+local function ligarHud(v)
+    if v then
+        montarHud()
+        hud.Enabled = true
+        if conHud then task.cancel(conHud) end
+        conHud = task.spawn(function()
+            while souAtual() and hud and hud.Enabled do
+                local p = pingMs()
+                local mem = math.floor(StatsS:GetTotalMemoryUsageMb())
+                local t = math.floor(os.clock() - nasceu)
+                hudTxt.Text = string.format(
+                    "<b>%d</b> fps\n%s ms  ·  %d MB\n%d/%d players\nup %02d:%02d",
+                    fpsAtual, p >= 0 and tostring(p) or "?", mem,
+                    #Players:GetPlayers(), Players.MaxPlayers,
+                    math.floor(t / 60), t % 60)
+                task.wait(0.5)
+            end
+        end)
+    else
+        if hud then hud.Enabled = false end
+    end
+end
+
+--==================================================================
+--                    QUEM ENTRA E QUEM SAI
+--==================================================================
+Players.PlayerAdded:Connect(function(p)
+    if souAtual() and E.avisoGente then avisar("Extras", p.Name .. " joined", 3) end
+end)
+Players.PlayerRemoving:Connect(function(p)
+    if souAtual() and E.avisoGente then avisar("Extras", p.Name .. " left", 3) end
+end)
+
+--==================================================================
+--                        DESFAZER TUDO
+--==================================================================
+local function restaurar()
+    if boostLigado then pcall(fpsBoost, false) else desfazerTudo() end
+    if livre then pcall(freecam, false) end
+    if espiando then pcall(espiar, false) end
+    LP.CameraMaxZoomDistance = ORIG.zoomMax
+    LP.CameraMinZoomDistance = ORIG.zoomMin
+    Camera.FieldOfView = ORIG.fov
+    E.antiAfk, E.autoRejoin, E.avisoGente, E.zoomLivre = false, false, false, false
+    if hud then pcall(function() hud:Destroy() end) hud = nil end
+    UIS.MouseBehavior = Enum.MouseBehavior.Default
+    pcall(function() CAS:UnbindAction("0x5A46_freeMov") end)
+end
+
+-- MEDIDO: este jogo NAO repoe zoom nem FOV (deixei 4000 e 100 por 1.5s e
+-- ficou). Entao esta ronda e so rede de seguranca, e devagar de proposito.
+task.spawn(function()
+    while souAtual() do
+        task.wait(2)
+        if E.zoomLivre and LP.CameraMaxZoomDistance < 2000 then
+            LP.CameraMaxZoomDistance = 4000
+            LP.CameraMinZoomDistance = 0.5
+        end
+        if math.abs(Camera.FieldOfView - E.fov) > 0.5 then
+            Camera.FieldOfView = E.fov
+        end
+    end
+end)
+
+--==================================================================
+--                            A ABA
+--==================================================================
+do
+    local aba = P.Tab("Extras", "✦")
+
+    ---------------------------------------------------------------- servidor
+    local s1 = aba:Section("Server", nil, 1)
+    local vitrine = s1:Status()
+    task.spawn(function()
+        while souAtual() do
+            local p = pingMs()
+            vitrine.Text = string.format("%d/%d players   ·   %s ms   ·   job %s",
+                #Players:GetPlayers(), Players.MaxPlayers,
+                p >= 0 and tostring(p) or "?", game.JobId:sub(1, 8))
+            task.wait(2)
+        end
+    end)
+    local ddHop = s1:Dropdown({ Name = "Hop to", Default = E.modoHop,
+        Items = { "Emptiest", "Fullest", "Random" } })
+    s1:Button({ Name = "Server hop", Callback = function()
+        E.modoHop = ddHop:Get() salvar()
+        task.spawn(pular, E.modoHop)
+    end })
+    s1:Button({ Name = "Rejoin", Callback = rejuntar })
+    s1:Button({ Name = "Copy job id", Callback = function()
+        if CLIP then CLIP(game.JobId) avisar("Extras", "Job id copied", 2)
+        else avisar("Extras", "Your executor has no setclipboard", 3) end
+    end })
+    s1:Toggle({ Name = "Auto rejoin on kick", Default = E.autoRejoin, Bell = false,
+        Callback = function(v) E.autoRejoin = v salvar() end })
+    s1:Toggle({ Name = "Anti AFK", Default = E.antiAfk, Bell = false,
+        Callback = function(v) E.antiAfk = v salvar() end })
+    local cxFonte = s1:Input({ Name = "Re-run after hop (loadstring)",
+        Placeholder = "paste your loadstring here", Default = E.fonte,
+        Callback = function(t) E.fonte = t salvar()
+            avisar("Extras", FILA and "Saved — will re-run after the hop"
+                or "Saved, but your executor has no queue_on_teleport", 4)
+        end })
+    cxFonte.Text = E.fonte
+
+    ---------------------------------------------------------------- desempenho
+    local s2 = aba:Section("Performance", nil, 1)
+    s2:Toggle({ Name = "FPS boost", Default = false, Bell = false,
+        Callback = function(v) task.spawn(fpsBoost, v) end })
+    s2:Checkbox({ Name = "Flatten materials too", Default = E.achatarMat,
+        Callback = function(v)
+            E.achatarMat = v salvar()
+            if boostLigado then
+                avisar("Extras", "Toggle FPS boost off and on to apply", 3)
+            end
+        end })
+    s2:Slider({ Name = "FPS cap", Min = 30, Max = 360, Default = 240,
+        Callback = function(v)
+            if CAP then CAP(v) else avisar("Extras", "No setfpscap here", 2) end
+        end })
+    s2:Toggle({ Name = "HUD (fps / ping)", Default = false, Bell = false,
+        Callback = function(v) ligarHud(v) end })
+    s2:Toggle({ Name = "Join / leave alerts", Default = E.avisoGente, Bell = false,
+        Callback = function(v) E.avisoGente = v salvar() end })
+
+    ---------------------------------------------------------------- camera
+    local s3 = aba:Section("Camera", nil, 2)
+    s3:Toggle({ Name = "Freecam", Default = false, Bell = false,
+        Keybind = { Key = Enum.KeyCode.V },
+        Callback = function(v) freecam(v) end })
+    s3:Label("RMB looks  ·  WASD QE  ·  Shift fast")
+    s3:Slider({ Name = "Freecam speed", Min = 10, Max = 300, Default = E.freeVel,
+        Callback = function(v) E.freeVel = v salvar() end })
+    s3:Slider({ Name = "Look sensitivity", Min = 0.2, Max = 3, Default = E.sens,
+        Decimals = 2, Callback = function(v) E.sens = v salvar() end })
+    s3:Slider({ Name = "FOV", Min = 20, Max = 120, Default = math.floor(ORIG.fov),
+        Callback = function(v) E.fov = v Camera.FieldOfView = v salvar() end })
+    s3:Toggle({ Name = "Unlock zoom", Default = false, Bell = false,
+        Callback = function(v)
+            E.zoomLivre = v salvar()
+            if v then
+                LP.CameraMaxZoomDistance = 4000
+                LP.CameraMinZoomDistance = 0.5
+            else
+                LP.CameraMaxZoomDistance = ORIG.zoomMax
+                LP.CameraMinZoomDistance = ORIG.zoomMin
+            end
+        end })
+
+    ---------------------------------------------------------------- espiar
+    local s4 = aba:Section("Spectate", nil, 2)
+    local ddGente = s4:Dropdown({ Name = "Player", Items = { "—" } })
+    local function atualizarLista()
+        local n = {}
+        for _, p in ipairs(Players:GetPlayers()) do
+            if p ~= LP then table.insert(n, p.Name) end
+        end
+        if #n == 0 then n = { "—" } end
+        ddGente:SetItems(n, true)
+    end
+    atualizarLista()
+    Players.PlayerAdded:Connect(function() if souAtual() then atualizarLista() end end)
+    Players.PlayerRemoving:Connect(function() if souAtual() then task.defer(atualizarLista) end end)
+    s4:Button({ Name = "Refresh list", Callback = atualizarLista })
+    local tgEspiar
+    tgEspiar = s4:Toggle({ Name = "Spectate", Default = false, Bell = false,
+        Callback = function(v)
+            if not espiar(v, ddGente:Get()) then tgEspiar:Set(false, true) end
+        end })
+
+    ---------------------------------------------------------------- sessao
+    local s5 = aba:Section("Session", nil, 2)
+    s5:Label("Saved spots")
+    for i = 1, 3 do
+        s5:Button({ Name = "Save slot " .. i, Callback = function() salvarSlot(i) end })
+        s5:Button({ Name = "Go to slot " .. i, Callback = function() task.spawn(irSlot, i) end })
+    end
+    s5:Button({ Name = "Unstuck (up 12)", Callback = function()
+        local r = raiz()
+        if r then firmar(r.CFrame + Vector3.new(0, 12, 0), 0.6) end
+    end })
+    s5:Button({ Name = "Reset character", Callback = function()
+        local h = LP.Character and LP.Character:FindFirstChildOfClass("Humanoid")
+        if h then h.Health = 0 end
+    end })
+    s5:Button({ Name = "Undo everything here", Callback = restaurar })
+end
+
+getgenv().Extras5A46 = { cfg = E, restaurar = restaurar, fpsBoost = fpsBoost, freecam = freecam }
 
 end)()
